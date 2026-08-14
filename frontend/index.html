@@ -1,0 +1,35 @@
+<!doctype html><html lang="it"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#12091f"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Rannatoni · Asta</title><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/static/icon-192.png"><link rel="stylesheet" href="/static/style.css">
+</head><body><main class="app narrow">
+<div class="eyebrow">Rannatoni · Asta di riparazione</div><h1>Entra nell'asta</h1><p class="muted">Inserisci le credenziali del tuo Rannatone.</p>
+<section class="card">
+  <div class="field"><label>Username</label><input id="username" type="text" autocomplete="username" autocapitalize="none" placeholder="es. alessandro"></div>
+  <div class="field"><label>PIN</label><input id="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="••••"></div>
+  <button id="loginBtn" class="btn-primary btn-block">Entra</button><div id="err" class="error"></div>
+</section>
+<section class="card compact">
+  <div class="eyebrow">Solo per seguire</div><h2>👀 Modalità spettatore</h2>
+  <p class="muted small">Segui giocatori, timer, risultati e offerte dopo l'apertura delle buste. Non partecipi all'asta.</p>
+  <button id="spectatorBtn" class="btn-ghost btn-block">Entra come spettatore</button>
+  <button id="spectatorContinueBtn" class="btn-ghost btn-block hidden" style="margin-top:8px">Torna come spettatore</button>
+</section>
+<section id="continueCard" class="card hidden"><h2>Sessione già presente</h2><button id="continueBtn" class="btn-ghost btn-block">Torna nell'asta Rannatoni</button></section>
+<section id="installCard" class="card install-card hidden"><h2>📲 Installa l'app</h2><p id="installText" class="muted small"></p><button id="installBtn" class="btn-ghost btn-block hidden">Installa sulla schermata Home</button></section>
+<div class="center small muted"><a href="/admin">Pannello Super Admin</a></div>
+</main><script>
+const $=id=>document.getElementById(id); let installPrompt=null;
+const token=localStorage.getItem('asta_token'); if(token) $('continueCard').classList.remove('hidden');
+$('continueBtn').onclick=()=>location.href='/auction';
+async function login(){ $('err').textContent=''; const username=$('username').value.trim(), pin=$('pin').value.trim(); if(!username||!pin){$('err').textContent='Compila entrambi i campi.';return}
+ try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,pin})});const d=await r.json(); if(!r.ok){$('err').textContent=typeof d.detail==='string'?d.detail:'Accesso non riuscito.';return}
+ localStorage.setItem('asta_token',d.token);localStorage.setItem('asta_team',d.team);localStorage.setItem('asta_manager',d.is_manager?'1':'0');location.href='/auction';}catch(e){$('err').textContent='Server non raggiungibile.'}}
+$('loginBtn').onclick=login;$('pin').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
+const spectatorToken=localStorage.getItem('asta_spectator_token');if(spectatorToken)$('spectatorContinueBtn').classList.remove('hidden');$('spectatorContinueBtn').onclick=()=>location.href='/spectator';$('spectatorBtn').onclick=async()=>{try{const r=await fetch('/api/spectator/login',{method:'POST'});const d=await r.json();if(!r.ok)return;localStorage.setItem('asta_spectator_token',d.token);location.href='/spectator'}catch(e){}};
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installCard').classList.remove('hidden');$('installBtn').classList.remove('hidden');$('installText').textContent='Puoi installare l’app come una normale app sul telefono.'});
+$('installBtn').onclick=async()=>{if(!installPrompt)return;installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;$('installBtn').classList.add('hidden')};
+const isiOS=/iphone|ipad|ipod/i.test(navigator.userAgent); const standalone=window.matchMedia('(display-mode: standalone)').matches||navigator.standalone;
+if(isiOS&&!standalone){$('installCard').classList.remove('hidden');$('installText').textContent='Su iPhone: apri con Safari, premi Condividi ⬆️ e poi “Aggiungi alla schermata Home”.';}
+if('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script></body></html>

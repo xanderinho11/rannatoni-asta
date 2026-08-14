@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#12091f">
+  <title>Rannatoni · Super Admin</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body><main class="app">
+  <div class="topbar">
+    <div><div class="eyebrow">Rannatoni · Super Admin</div><div class="brand">Preparazione asta</div></div>
+    <button id="adminLogout" class="btn-ghost btn-sm hidden">Esci</button>
+  </div>
+
+  <section id="loginCard" class="card narrow">
+    <h2>Accesso organizzatore</h2>
+    <div class="field"><label>Password Super Admin</label><input id="adminPassword" type="password" placeholder="Password"></div>
+    <button id="adminLogin" class="btn-primary btn-block">Accedi</button>
+    <div id="loginErr" class="error"></div>
+    <p class="tiny muted">In locale la password predefinita è <strong>asta2026</strong>. Online va impostata tramite <strong>ADMIN_PASSWORD</strong>.</p>
+  </section>
+
+  <div id="panel" class="hidden">
+    <div class="progress-steps"><div id="stepCatalog" class="step">1 · Catalogo</div><div id="stepRosters" class="step">2 · Rose</div><div id="stepConfig" class="step">3 · Squadre</div></div>
+
+    <section class="card">
+      <h2>1. Carica catalogo</h2>
+      <p class="small muted">L'import è atomico: se il file contiene errori il database non viene modificato.</p>
+      <div class="upload"><input id="catalogFile" type="file" accept=".csv,text/csv"><button id="catalogBtn" class="btn-ghost btn-block">Carica catalogo</button></div>
+      <div id="catalogMsg" class="error"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. Carica rose</h2>
+      <p class="small muted">Le squadre vengono ricavate automaticamente dal file e le rose sostituiscono quelle precedenti.</p>
+      <div class="upload"><input id="rostersFile" type="file" accept=".csv,text/csv"><button id="rostersBtn" class="btn-ghost btn-block">Carica rose</button></div>
+      <div id="rostersMsg" class="error"></div>
+    </section>
+
+    <section class="card accent">
+      <div class="row between wrap-row">
+        <div><h2 style="margin-bottom:4px">3. Configura squadre</h2><div class="small muted">Username, PIN temporaneo, residuo (anche negativo) e gestore.</div></div>
+        <button id="suggestBtn" class="btn-ghost btn-sm">Genera dati mancanti</button>
+      </div>
+      <div class="notice" style="margin-top:12px">🔐 Il PIN attuale di un Rannatone non è mai visibile al Super Admin. I PIN temporanei sono mostrati solo quando vengono creati o resettati.</div>
+      <div class="spacer"></div><div id="teamsBox"></div><div id="configErr" class="error"></div>
+      <div class="button-row stack-mobile"><button id="saveConfigBtn" class="btn-primary">Salva configurazione</button><button id="copyCredsBtn" class="btn-ghost">Copia PIN temporanei</button></div>
+    </section>
+
+    <section id="managerCard" class="card hidden">
+      <h2>🎮 Gestore asta</h2><p id="managerText" class="muted small"></p>
+      <button id="enterManagerBtn" class="btn-primary btn-block">Entra nell'asta come gestore</button>
+    </section>
+
+    <section class="card">
+      <h2>Salvataggi</h2>
+      <div class="grid2 mobile1">
+        <button id="backupBtn" class="btn-ghost">Crea backup completo</button><button id="reloadBackupsBtn" class="btn-ghost">Aggiorna elenco</button>
+        <button id="exportRoseBtn" class="btn-ghost">Scarica rose attuali</button><button id="exportCredsBtn" class="btn-ghost">Scarica accessi/residui</button>
+      </div>
+      <div id="backupMsg" class="success"></div><div id="backupList" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card danger">
+      <h2>Zona pericolosa</h2><p class="small muted">Azioni immediate: usale solo se vuoi ricominciare una prova.</p>
+      <div class="button-row stack-mobile"><button id="resetKeepBtn" class="btn-danger">Azzera asta, tieni catalogo</button><button id="resetAllBtn" class="btn-danger">Azzera tutto</button></div>
+    </section>
+  </div>
+</main>
+<div id="toast" class="toast hidden"></div>
+<script>
+const $=id=>document.getElementById(id);
+let setupToken=localStorage.getItem('setup_token'), teams=[];
+const teamRefs=new Map(), temporaryPins=new Map();
+function detailText(d){if(!d)return'Errore';if(typeof d.detail==='string')return d.detail;if(d.detail&&d.detail.message)return d.detail.message+(d.detail.errors?'\n'+d.detail.errors.join('\n'):'');return'Operazione non riuscita.'}
+function toast(text,error=false){const t=$('toast');t.textContent=text;t.className='toast'+(error?' error-toast':'');clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.add('hidden'),3000)}
+async function api(path,opts={}){opts.headers=Object.assign({},opts.headers||{},setupToken?{'Authorization':'Bearer '+setupToken}:{});const r=await fetch(path,opts);if(r.status===401||r.status===403){localStorage.removeItem('setup_token');setupToken=null;showLogin();throw new Error('Sessione admin scaduta.')}return r}
+function showLogin(){$('loginCard').classList.remove('hidden');$('panel').classList.add('hidden');$('adminLogout').classList.add('hidden')}
+function showPanel(){$('loginCard').classList.add('hidden');$('panel').classList.remove('hidden');$('adminLogout').classList.remove('hidden');refreshAll()}
+$('adminLogin').onclick=async()=>{ $('loginErr').textContent='';try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('adminPassword').value})});const d=await r.json();if(!r.ok){$('loginErr').textContent=detailText(d);return}setupToken=d.token;localStorage.setItem('setup_token',setupToken);showPanel()}catch(e){$('loginErr').textContent=e.message}}
+$('adminLogout').onclick=()=>{localStorage.removeItem('setup_token');setupToken=null;showLogin()};
+async function refreshAll(){try{const [sr,tr]=await Promise.all([api('/api/admin/stats'),api('/api/admin/teams')]);const stats=await sr.json();teams=await tr.json();$('stepCatalog').classList.toggle('done',stats.players>0);$('stepRosters').classList.toggle('done',stats.roster>0);$('stepConfig').classList.toggle('done',teams.length>0&&teams.every(t=>t.username&&t.pin_configured));renderTeams();renderManager();loadBackups()}catch(e){}}
+function makeInput(value,type='text'){const i=document.createElement('input');i.className='input mini';i.type=type;i.value=value??'';return i}
+function renderTeams(){const box=$('teamsBox');box.replaceChildren();teamRefs.clear();if(!teams.length){const n=document.createElement('div');n.className='notice';n.textContent='Carica prima il file rose: le squadre compariranno qui automaticamente.';box.appendChild(n);return}
+ teams.forEach(t=>{const card=document.createElement('div');card.className='setup-team';const title=document.createElement('div');title.className='team-title';title.textContent=t.name;card.appendChild(title);const grid=document.createElement('div');grid.className='grid2 mobile1';
+  const f1=document.createElement('div');f1.className='field';const l1=document.createElement('label');l1.textContent='Username';const u=makeInput(t.username||'');f1.append(l1,u);
+  const f2=document.createElement('div');f2.className='field';const l2=document.createElement('label');l2.textContent='PIN';const pinWrap=document.createElement('div');
+  let p=null;if(t.pin_configured){const status=document.createElement('div');status.className='pin-status';status.textContent=t.pin_must_change?'🔐 PIN temporaneo impostato':'🔐 PIN privato impostato';pinWrap.appendChild(status);const reset=document.createElement('button');reset.className='btn-ghost btn-sm';reset.textContent='Reset PIN';reset.onclick=()=>resetPin(t.name);pinWrap.appendChild(reset);if(temporaryPins.has(t.name)){const one=document.createElement('div');one.className='notice warn one-time-pin';one.textContent=`PIN temporaneo: ${temporaryPins.get(t.name)} · copialo ora`;pinWrap.appendChild(one)}}else{p=makeInput(temporaryPins.get(t.name)||'','password');p.inputMode='numeric';p.placeholder='4 o 6 cifre';pinWrap.appendChild(p)}f2.append(l2,pinWrap);
+  const f3=document.createElement('div');f3.className='field';const l3=document.createElement('label');l3.textContent='Residuo';const b=makeInput(t.budget,'number');f3.append(l3,b);
+  const f4=document.createElement('div');f4.className='field';const l4=document.createElement('label');l4.textContent='Gestione asta';const lab=document.createElement('label');lab.className='radio-manager';const radio=document.createElement('input');radio.type='radio';radio.name='manager';radio.value=t.name;radio.checked=!!t.is_admin;lab.append(radio,document.createTextNode('Questa squadra gestisce l\'asta'));f4.append(l4,lab);
+  grid.append(f1,f2,f3,f4);card.appendChild(grid);box.appendChild(card);teamRefs.set(t.name,{username:u,pin:p,budget:b,manager:radio})})}
+$('suggestBtn').onclick=async()=>{try{const r=await api('/api/admin/teams/suggestions');const d=await r.json();if(!r.ok)return toast(detailText(d),true);const map=new Map(d.map(x=>[x.name,x]));for(const t of teams){const refs=teamRefs.get(t.name),x=map.get(t.name);if(!refs||!x)continue;if(!refs.username.value.trim())refs.username.value=x.username||'';if(refs.pin&&x.pin&&!refs.pin.value.trim()){refs.pin.value=x.pin;temporaryPins.set(t.name,x.pin)}}toast('Dati mancanti generati')}catch(e){toast(e.message,true)}};
+function collectConfig(){return teams.map(t=>{const r=teamRefs.get(t.name);return{name:t.name,username:r.username.value.trim(),pin:r.pin?r.pin.value.trim():null,budget:Number(r.budget.value),is_admin:r.manager.checked}})}
+$('saveConfigBtn').onclick=async()=>{ $('configErr').textContent='';try{const payload={teams:collectConfig()};for(const x of payload.teams)if(x.pin)temporaryPins.set(x.name,x.pin);const r=await api('/api/admin/teams/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok){$('configErr').textContent=detailText(d);return}await refreshAll();toast('Configurazione salvata')}catch(e){$('configErr').textContent=e.message}};
+$('copyCredsBtn').onclick=async()=>{const cfg=collectConfig();const lines=[];for(const x of cfg){const pin=(x.pin||temporaryPins.get(x.name)||'').trim();if(pin)lines.push(`${x.name}\nUsername: ${x.username}\nPIN temporaneo: ${pin}`)}if(!lines.length)return toast('Nessun PIN temporaneo visibile da copiare.',true);try{await navigator.clipboard.writeText(lines.join('\n\n'));toast('PIN temporanei copiati')}catch(e){toast('Non riesco a usare gli appunti.',true)}};
+async function resetPin(team){try{const r=await api('/api/admin/teams/reset-pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team})});const d=await r.json();if(!r.ok)return toast(detailText(d),true);temporaryPins.set(team,d.temporary_pin);await refreshAll();toast(`Nuovo PIN temporaneo creato per ${team}`)}catch(e){toast(e.message,true)}}
+function renderManager(){const m=teams.find(t=>t.is_admin);$('managerCard').classList.toggle('hidden',!m);if(m){$('managerText').textContent=`Gestore selezionato: ${m.name}. Entri direttamente senza secondo login.`;$('enterManagerBtn').dataset.team=m.name}}
+$('enterManagerBtn').onclick=async()=>{const team=$('enterManagerBtn').dataset.team;try{const r=await api('/api/admin/enter-manager',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team})});const d=await r.json();if(!r.ok)throw new Error(detailText(d));localStorage.setItem('asta_token',d.token);localStorage.setItem('asta_team',d.team);localStorage.setItem('asta_manager','1');location.href='/auction'}catch(e){toast(e.message,true)}};
+async function upload(fileInput,path,msgEl){const f=$(fileInput).files[0];if(!f){$(msgEl).textContent='Seleziona un file CSV.';return}const fd=new FormData();fd.append('file',f);try{const r=await api(path,{method:'POST',body:fd});const d=await r.json();if(!r.ok){$(msgEl).textContent=detailText(d);return}$(msgEl).textContent='';toast('Caricamento completato');await refreshAll()}catch(e){$(msgEl).textContent=e.message}}
+$('catalogBtn').onclick=()=>upload('catalogFile','/api/admin/upload/catalog','catalogMsg');$('rostersBtn').onclick=()=>upload('rostersFile','/api/admin/upload/rosters','rostersMsg');
+async function download(path,name){const r=await api(path);if(!r.ok)return;const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
+$('exportRoseBtn').onclick=()=>download('/api/admin/export/rose','rose_attuali.csv');$('exportCredsBtn').onclick=()=>download('/api/admin/export/residui','accessi_residui.csv');
+$('backupBtn').onclick=async()=>{const r=await api('/api/admin/backup',{method:'POST'});toast(r.ok?'Backup completo creato.':'Backup non riuscito.',!r.ok);loadBackups()};$('reloadBackupsBtn').onclick=loadBackups;
+async function loadBackups(){if(!setupToken)return;try{const r=await api('/api/admin/backup');const list=await r.json();const box=$('backupList');box.replaceChildren();if(!list.length){const d=document.createElement('div');d.className='small muted';d.textContent='Nessun backup ancora.';box.appendChild(d);return}list.slice(0,12).forEach(x=>{const row=document.createElement('div');row.className='team-line';const s=document.createElement('span');s.className='small';s.textContent=x.etichetta;const b=document.createElement('button');b.className='btn-ghost btn-sm';b.textContent='Ripristina';b.onclick=()=>restoreBackup(x.tag);row.append(s,b);box.appendChild(row)})}catch(e){}}
+async function restoreBackup(tag){const r=await api('/api/admin/backup/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag})});const d=await r.json();if(!r.ok)return toast(detailText(d),true);await refreshAll();toast('Backup ripristinato')}
+async function reset(keep){const r=await api('/api/admin/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep_catalog:keep})});if(r.ok){temporaryPins.clear();refreshAll();toast('Reset completato')}else toast('Reset non riuscito',true)}
+$('resetKeepBtn').onclick=()=>reset(true);$('resetAllBtn').onclick=()=>reset(false);
+if(setupToken)showPanel();else showLogin();if('serviceWorker'in navigator&&window.isSecureContext)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script></body></html>
