@@ -19,6 +19,7 @@ import auction as auction_module
 import csv_parser
 import db
 import storage
+import push_service
 
 # ========= CONFIG =========
 DEFAULT_ADMIN_PASSWORD = "asta2026"
@@ -33,6 +34,10 @@ SIMULATION_PATH = os.path.join(DATA_DIR, "simulation_base.db")
 
 app = FastAPI(title="Rannatoni - Asta di riparazione")
 db.init_db()
+try:
+    push_service.ensure_vapid_keys()
+except Exception as exc:
+    print(f"[push] inizializzazione non riuscita: {exc}")
 auction = auction_module.auction
 auction.load_persisted()
 
@@ -263,6 +268,7 @@ def build_state(viewer_team: str | None = None):
     state["auto_random_seconds"] = auto_random_seconds()
     state["teams"] = _teams_with_presence()
     state["active_market_count"] = sum(1 for t in state["teams"] if not t.get("market_finished"))
+    state["auction_progress"] = db.get_auction_progress()
     if viewer_team:
         me = db.get_team(viewer_team)
         if me:
@@ -617,6 +623,32 @@ def spectator_rosters(_: dict = Depends(require_spectator)):
     return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.MAX_ROSA}
 
 
+class PushSubscriptionBody(BaseModel):
+    endpoint: str
+    keys: dict[str, str]
+
+
+@app.get("/api/push/public-key")
+def push_public_key(_: dict = Depends(require_team)):
+    return {"public_key": push_service.public_key()}
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(body: PushSubscriptionBody, session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    try:
+        db.upsert_push_subscription(session["team"], body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(body: PushSubscriptionBody, session: dict = Depends(require_team)):
+    db.delete_push_subscription(body.endpoint, session["team"])
+    return {"ok": True}
+
+
 class ReadyBody(BaseModel):
     ready: bool = True
 
@@ -648,6 +680,32 @@ async def finish_market(session: dict = Depends(require_team)):
 
 
 # ========= TIMER / ASTA =========
+async def _push_new_auction():
+    player = db.get_player(auction.current_pid) if auction.current_pid is not None else None
+    if not player or not auction.eligible_teams:
+        return
+    await push_service.send_to_teams(
+        auction.eligible_teams,
+        title="🎲 Nuova asta Rannatoni",
+        body=f"{player['name']} — entra per offrire",
+        url="/auction",
+        tag=f"asta-{player['pid']}",
+    )
+
+
+async def _push_tiebreak(result: dict):
+    player = db.get_player(result.get("pid")) if result.get("pid") is not None else None
+    if not player:
+        return
+    await push_service.send_to_teams(
+        result.get("teams") or [],
+        title="⚔️ Spareggio Rannatoni",
+        body=f"{player['name']} — devi rilanciare",
+        url="/auction",
+        tag=f"spareggio-{player['pid']}",
+    )
+
+
 def _cancel_auto_random():
     global _auto_random_task, _auto_random_deadline
     task = _auto_random_task
@@ -685,6 +743,7 @@ async def _arm_auto_random():
                 auction.open_random()
                 _start_timer()
             await broadcast_state()
+            asyncio.create_task(_push_new_auction())
         except asyncio.CancelledError:
             return
         except auction_module.AuctionError as exc:
@@ -740,6 +799,8 @@ async def _close_and_broadcast(from_timer: bool = False):
             backup_if_real("giocatore passato")
     await manager.broadcast_result(result)
     await broadcast_state()
+    if result.get("type") == "tiebreak":
+        asyncio.create_task(_push_tiebreak(result))
     if result.get("type") in ("assigned", "no_offers") and not result.get("needs_release"):
         await _arm_auto_random()
     return result
@@ -765,6 +826,7 @@ async def open_random(body: RandomBody, _: dict = Depends(require_auction_manage
             raise HTTPException(400, str(exc)) from exc
         _start_timer()
     await broadcast_state()
+    asyncio.create_task(_push_new_auction())
     return {"ok": True, "pid": pid, "player": db.get_player(pid), "participants": len(auction.eligible_teams)}
 
 
@@ -783,6 +845,7 @@ async def open_manual(body: OpenPlayerBody, _: dict = Depends(require_auction_ma
             raise HTTPException(400, str(exc)) from exc
         _start_timer()
     await broadcast_state()
+    asyncio.create_task(_push_new_auction())
     return {"ok": True}
 
 

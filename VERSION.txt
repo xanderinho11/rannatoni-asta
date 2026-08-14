@@ -1,3 +1,1 @@
-Rannatoni Asta v4
-Build locale + Railway-ready
-Timer buste: 60 secondi
+5.0

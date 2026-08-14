@@ -1,4 +1,4 @@
-const CACHE='rannatoni-shell-v4';
+const CACHE='rannatoni-shell-v5';
 const ASSETS=[
   '/static/style.css',
   '/static/icon-192.png',
@@ -33,14 +33,34 @@ self.addEventListener('fetch',event=>{
   );
 });
 
+
+self.addEventListener('push',event=>{
+  let data={};
+  try{data=event.data?event.data.json():{}}catch(e){data={body:event.data?event.data.text():''}}
+  event.waitUntil((async()=>{
+    const windows=await clients.matchAll({type:'window',includeUncontrolled:true});
+    if(windows.some(client=>client.visibilityState==='visible')) return;
+    await self.registration.showNotification(data.title||'Rannatoni',{
+      body:data.body||'',
+      icon:'/static/icon-192.png',
+      badge:'/static/icon-192.png',
+      tag:data.tag||'rannatoni',
+      renotify:true,
+      data:{url:data.url||'/auction'}
+    });
+  })());
+});
+
 self.addEventListener('notificationclick',event=>{
   event.notification.close();
   event.waitUntil(
-    clients.matchAll({type:'window',includeUncontrolled:true}).then(list=>{
+    clients.matchAll({type:'window',includeUncontrolled:true}).then(async list=>{
+      const url=(event.notification.data&&event.notification.data.url)||'/auction';
       for(const client of list){
+        if('navigate' in client) await client.navigate(url);
         if('focus' in client) return client.focus();
       }
-      return clients.openWindow('/auction');
+      return clients.openWindow(url);
     })
   );
 });

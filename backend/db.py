@@ -104,6 +104,17 @@ def init_db():
                 state_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                endpoint TEXT PRIMARY KEY,
+                team TEXT NOT NULL,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (team) REFERENCES teams(name) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_team ON push_subscriptions(team);
             """
         )
 
@@ -479,6 +490,15 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
             "INSERT INTO roster(team,pid,price) VALUES (?,?,?)",
             [(a["team"].strip(), int(a["pid"]), int(a["price"])) for a in assignments],
         )
+        # Salviamo la dimensione iniziale del bacino d'asta. In seguito le rose
+        # cambiano, quindi calcolarlo dal roster corrente darebbe un totale mobile.
+        total_players = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+        initial_owned = len({int(a["pid"]) for a in assignments})
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(max(0, int(total_players) - initial_owned)),),
+        )
         conn.commit()
 
 
@@ -617,6 +637,85 @@ def get_passed_players():
         return [_player_row_to_dict(r) for r in rows]
 
 
+# ---------- PROGRESSO ASTA ----------
+def get_auction_progress():
+    """Numero di calciatori diversi gia' chiusi e totale del bacino iniziale."""
+    with get_conn() as conn:
+        auctioned = conn.execute(
+            """SELECT COUNT(DISTINCT pid) FROM auction_events
+               WHERE undone=0 AND pid IS NOT NULL AND event_type IN ('assigned','no_offers')"""
+        ).fetchone()[0]
+        row = conn.execute("SELECT value FROM settings WHERE key='auction_pool_total'").fetchone()
+        if row is not None:
+            total = int(row["value"] or 0)
+        else:
+            # Fallback per database creati con una versione precedente alla v5.
+            free_now = conn.execute(
+                """SELECT COUNT(*) FROM players
+                   WHERE pid NOT IN (SELECT pid FROM roster)
+                     AND pid NOT IN (SELECT pid FROM passed_players)"""
+            ).fetchone()[0]
+            total = int(auctioned) + int(free_now)
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(total),),
+            )
+            conn.commit()
+        return {"auctioned": int(auctioned), "total": max(int(total), int(auctioned))}
+
+
+# ---------- WEB PUSH ----------
+def upsert_push_subscription(team: str, subscription: dict):
+    endpoint = str((subscription or {}).get("endpoint") or "").strip()
+    keys = (subscription or {}).get("keys") or {}
+    p256dh = str(keys.get("p256dh") or "").strip()
+    auth = str(keys.get("auth") or "").strip()
+    if not endpoint or not p256dh or not auth:
+        raise ValueError("Sottoscrizione push non valida.")
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO push_subscriptions(endpoint,team,p256dh,auth,created_at,updated_at)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(endpoint) DO UPDATE SET
+                 team=excluded.team,p256dh=excluded.p256dh,auth=excluded.auth,updated_at=excluded.updated_at""",
+            (endpoint, team, p256dh, auth, now, now),
+        )
+        conn.commit()
+
+
+def delete_push_subscription(endpoint: str, team: str | None = None):
+    with get_conn() as conn:
+        if team:
+            conn.execute("DELETE FROM push_subscriptions WHERE endpoint=? AND team=?", (endpoint, team))
+        else:
+            conn.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+        conn.commit()
+
+
+def push_subscriptions_for_teams(teams: list[str] | set[str]):
+    names = sorted({str(t) for t in teams if t})
+    if not names:
+        return []
+    placeholders = ",".join("?" for _ in names)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT endpoint,team,p256dh,auth FROM push_subscriptions WHERE team IN ({placeholders})",
+            names,
+        ).fetchall()
+        return [
+            {
+                "team": r["team"],
+                "subscription": {
+                    "endpoint": r["endpoint"],
+                    "keys": {"p256dh": r["p256dh"], "auth": r["auth"]},
+                },
+            }
+            for r in rows
+        ]
+
+
 # ---------- STORICO ----------
 def log_event(event_type: str, pid: int | None, team: str | None = None, price: int | None = None,
               reveal: dict | None = None, rounds: list | None = None,
@@ -640,7 +739,7 @@ def get_auction_history(limit: int = 100):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT e.*, p.name AS player_name, p.roles AS player_roles, p.club AS player_club
+            SELECT e.*, p.name AS player_name, p.roles AS player_roles, p.club AS player_club, p.img AS player_img
             FROM auction_events e LEFT JOIN players p ON p.pid=e.pid
             WHERE e.undone=0 ORDER BY e.id DESC LIMIT ?
             """,
