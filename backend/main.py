@@ -228,7 +228,7 @@ _timer_task = None
 _presence_task = None
 _auto_random_task = None
 _auto_random_deadline = None
-AUTO_RANDOM_DELAY = 5
+AUTO_RANDOM_DELAY = 10
 
 
 def simulation_active():
@@ -283,6 +283,7 @@ def build_state(viewer_team: str | None = None):
                 "roster_size": len(roster),
                 "roster_signature": "|".join(f"{g['pid']}:{g['price']}" for g in sorted(roster, key=lambda x: x['pid'])),
                 "max_roster": db.MAX_ROSA,
+                "roster_rules": db.roster_summary(viewer_team),
             }
             if state["me"]["is_manager"]:
                 state["spectator_count"] = manager.spectator_count()
@@ -567,8 +568,15 @@ def history(_: dict = Depends(require_team)):
 
 
 @app.get("/api/rosters")
-def rosters(_: dict = Depends(require_team)):
+def rosters(session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
     return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.MAX_ROSA}
+
+
+@app.get("/api/free-agents")
+def free_agents(session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    return db.get_free_agents(session["team"])
 
 
 class FirstPinBody(BaseModel):
@@ -623,6 +631,11 @@ def spectator_rosters(_: dict = Depends(require_spectator)):
     return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.MAX_ROSA}
 
 
+@app.get("/api/spectator/free-agents")
+def spectator_free_agents(_: dict = Depends(require_spectator)):
+    return db.get_free_agents(None)
+
+
 class PushSubscriptionBody(BaseModel):
     endpoint: str
     keys: dict[str, str]
@@ -670,13 +683,19 @@ async def finish_market(session: dict = Depends(require_team)):
     _ensure_pin_changed(session)
     if auction.mode != "idle":
         raise HTTPException(400, "Puoi concludere il mercato solo tra un'asta e la successiva.")
+    summary = db.roster_summary(session["team"])
+    if not summary["valid_finish"]:
+        raise HTTPException(400, {
+            "message": "La rosa non rispetta i requisiti per concludere il mercato.",
+            "roster_rules": summary,
+        })
     try:
         db.set_market_finished(session["team"], True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     await broadcast_state()
     await _arm_auto_random()
-    return {"ok": True, "market_finished": True}
+    return {"ok": True, "market_finished": True, "roster_rules": summary}
 
 
 # ========= TIMER / ASTA =========

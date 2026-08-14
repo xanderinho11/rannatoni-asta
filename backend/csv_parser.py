@@ -8,6 +8,58 @@ import io
 ALLOWED_MANTRA_ROLES = {"P", "Ds", "Dc", "Dd", "E", "M", "C", "W", "T", "A", "Pc", "B"}
 
 
+STAT_HEADER_ALIASES = {
+    "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "qt"},
+    "fvm": {"fvm", "fanta valore di mercato", "fantavalore", "fanta valore"},
+    "fantamedia": {"fm", "fantamedia", "fanta media"},
+    "media_voto": {"mv", "media voto", "media voti", "media"},
+    "presenze": {"pv", "presenze", "presenza"},
+    "gol": {"gf", "gol", "goal", "reti"},
+    "assist": {"ass", "assist"},
+    "ammonizioni": {"amm", "ammonizioni"},
+    "espulsioni": {"esp", "espulsioni"},
+    "rigori_segnati": {"rf", "rigori segnati", "rigori fatti"},
+}
+
+STAT_LABELS = {
+    "quotazione": "Quotazione",
+    "fvm": "FVM",
+    "fantamedia": "FantaMedia",
+    "media_voto": "Media voto",
+    "presenze": "Presenze",
+    "gol": "Gol",
+    "assist": "Assist",
+    "ammonizioni": "Ammonizioni",
+    "espulsioni": "Espulsioni",
+    "rigori_segnati": "Rigori segnati",
+}
+
+def _norm_header(value: str):
+    return " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+
+def _parse_stat_number(value):
+    raw = str(value or "").strip().replace("%", "")
+    if not raw or raw in {"-", "--", "n.d.", "nd", "nan"}:
+        return None
+    # In molti CSV italiani la virgola e' il separatore decimale.
+    raw = raw.replace(" ", "").replace(",", ".")
+    try:
+        n = float(raw)
+    except ValueError:
+        return None
+    return int(n) if n.is_integer() else round(n, 3)
+
+def _stat_columns(header):
+    columns = {}
+    normalized = [_norm_header(x) for x in header]
+    for key, aliases in STAT_HEADER_ALIASES.items():
+        for idx, name in enumerate(normalized):
+            if name in aliases:
+                columns[key] = idx
+                break
+    return columns
+
+
 def export_residui_csv(teams: list) -> str:
     """Esporta username, residui e gestore senza rivelare PIN o hash."""
     out = io.StringIO()
@@ -162,13 +214,23 @@ def parse_rosters_csv(text: str):
 
 
 def parse_catalog_csv(text: str):
-    """Formato atteso (come export classico Excel fantacalcio):
-    col0=ID, col2=Nome completo, col4=Ruolo Mantra, col9=Squadra club, + eventuale URL immagine
+    """Import catalogo Fantacalcio.
+
+    Mantiene la compatibilita' con il layout usato dal bot (ID in colonna 0,
+    nome in 2, ruolo Mantra in 4, squadra in 9) e, quando il CSV contiene
+    intestazioni riconoscibili, conserva anche statistiche utili alla sezione
+    Svincolati (quotazione, FantaMedia, media voto, gol, assist, ecc.).
     """
     rows = _read_csv_rows(text)
-    result = {"players": [], "errors": []}
+    result = {"players": [], "errors": [], "stat_labels": STAT_LABELS.copy()}
+    if not rows:
+        return result
+
+    header = rows[0] if rows and rows[0] and rows[0][0].strip().upper() == "ID" else []
+    stat_cols = _stat_columns(header) if header else {}
     id_seen = set()
-    for i, r in enumerate(rows):
+    for i, raw_row in enumerate(rows):
+        r = list(raw_row)
         while len(r) < 20:
             r.append("")
         raw_id = r[0].strip()
@@ -195,6 +257,13 @@ def parse_catalog_csv(text: str):
                 image_url = c
                 break
 
+        stats = {}
+        for key, idx in stat_cols.items():
+            if idx < len(raw_row):
+                value = _parse_stat_number(raw_row[idx])
+                if value is not None:
+                    stats[key] = value
+
         roles = normalize_roles(ruolo_raw)
         result["players"].append({
             "pid": pid,
@@ -202,5 +271,7 @@ def parse_catalog_csv(text: str):
             "roles": roles,
             "club": club,
             "img": image_url,
+            "stats": stats,
         })
     return result
+

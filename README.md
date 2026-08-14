@@ -1,6 +1,6 @@
-# Rannatoni v4 — locale + Railway
+# Rannatoni v6 — locale + Railway
 
-Web-app/PWA per l'asta di riparazione della lega **Rannatoni**. La v4 gira in locale e contiene già la configurazione per il deploy Railway.
+Web-app/PWA per l'asta di riparazione della lega **Rannatoni**. La v6 gira in locale e contiene già la configurazione per il deploy Railway.
 
 ## Avvio locale su Windows
 
@@ -30,7 +30,7 @@ Password locale predefinita: **`asta2026`**.
 - Il PIN personale può essere cambiato in seguito dal Profilo.
 - Cambio/reset PIN invalida le altre sessioni della squadra.
 
-## Asta veloce v4
+## Asta veloce
 
 - Timer standard: **60 secondi**.
 - Quando parte una busta, partecipano **solo i Rannatoni che risultano Pronti in quell'istante**.
@@ -52,7 +52,7 @@ La stessa indicazione resta anche nello Storico.
 
 ## RANDOM automatico
 
-Con **RANDOM automatico** attivo, dopo la chiusura completa dell'asta parte un countdown di 5 secondi. È sufficiente che ci sia **almeno un Rannatone Pronto**: la nuova busta coinvolge solo chi è Pronto in quel momento.
+Con **RANDOM automatico** attivo, dopo la chiusura completa dell'asta parte un countdown di 10 secondi. È sufficiente che ci sia **almeno un Rannatone Pronto**: la nuova busta coinvolge solo chi è Pronto in quel momento.
 
 Il gestore può fermare la singola estrazione automatica dal countdown.
 
@@ -62,6 +62,7 @@ Nel menu inferiore sono disponibili:
 
 - **La mia rosa** — rosa personale;
 - **Rose** — tutte le squadre della lega;
+- **Svincolati** — tutti i calciatori liberi con ricerca, filtri ruolo e ordinamento per statistiche disponibili;
 - **Storico**;
 - **Lobby**.
 
@@ -76,7 +77,7 @@ Le rose sono ordinate usando sempre il **primo ruolo del catalogo**:
 
 **POR → DC → DD → DS → B → E → M → C → W → T → A → PC**
 
-I multiruolo mantengono fino a 3 badge visibili. `W` usa lo stesso colore di `T`; `PC` lo stesso colore di `A`.
+I multiruolo mantengono fino a 3 badge visibili. `E` usa lo stesso azzurro di `M/C`; `W` lo stesso colore di `T`; `PC` lo stesso colore di `A`.
 
 ## Spettatore
 
@@ -88,9 +89,19 @@ La modalità 👀 Spettatore non partecipa all'asta e non viene conteggiata nei 
 - tutte le Rose con posti e residui;
 - Storico.
 
-## Fine mercato
+## Svincolati e riacquisto
 
-**🏁 Ho finito gli acquisti** esclude la squadra dalle aste future. Il gestore può riattivarla. **Disconnetti** invalida realmente la sessione.
+La sezione **Svincolati** mostra tutti i giocatori liberi. Un multiruolo compare in ogni filtro ruolo che possiede (es. `DS/DD/E` compare in DS, DD ed E). La ricerca per nome e l’ordinamento possono usare Quotazione, FantaMedia, Media voto, Gol, Assist e gli altri dati riconosciuti nel Catalogo.
+
+Se una squadra svincola un calciatore a `X`, può riacquistarlo ma la sua offerta minima personale è `X`. Se vince con le altre offerte più basse, il prezzo finale resta comunque almeno `X`.
+
+## Vincoli rosa e fine mercato
+
+- minimo **2 POR**, massimo **5 POR**;
+- minimo **21 giocatori di movimento**;
+- massimo **35 giocatori totali**.
+
+**🏁 Ho finito gli acquisti** mostra un riepilogo della rosa e può essere confermato solo se i requisiti sono rispettati. Dopo la conferma il Rannatone non può rientrare autonomamente: può farlo solo il gestore con **Riattiva Rannatone**. **Disconnetti** invalida realmente la sessione.
 
 ## Affidabilità
 
@@ -113,3 +124,9 @@ Online devi impostare:
 - Volume persistente montato su `/app/data`.
 
 La build online si rifiuta di partire con la password locale `asta2026`.
+
+## v5 - notifiche push
+
+La v5 aggiunge Web Push reali per i Rannatoni partecipanti. Le chiavi VAPID vengono generate automaticamente al primo avvio e salvate nella cartella `data/`, quindi su Railway restano persistenti nel volume montato su `/app/data`.
+
+Non serve configurare manualmente le chiavi. Facoltativamente si può impostare la variabile `VAPID_SUBJECT` con un contatto `mailto:` o URL.

@@ -151,6 +151,11 @@ class Auction:
                 f"Offerta troppo alta: massimo {massimo} "
                 f"(residuo {squadra['budget']} + svincoli possibili)."
             )
+        release_floor = db.get_release_floor(team, self.current_pid)
+        if release_floor and amount < int(release_floor):
+            raise AuctionError(
+                f"Hai svincolato questo giocatore a {release_floor}: la tua offerta minima e' {release_floor}."
+            )
         if self.mode == "tiebreak" and amount <= int(self.tiebreak_value):
             raise AuctionError(f"Nello spareggio devi superare {self.tiebreak_value}.")
         self.offers[team] = amount
@@ -276,20 +281,29 @@ class Auction:
         player = db.get_player(pid)
         squadra = db.get_team(team)
         roster = db.get_roster(team)
+        release_floor = db.get_release_floor(team, pid)
+        # Se il vincitore aveva precedentemente svincolato il giocatore, non puo'
+        # riacquistarlo a meno del prezzo di quello svincolo.
+        price = max(int(price), int(release_floor or 0))
         result = {
             "type": "assigned", "team": team, "pid": pid,
             "player_name": player["name"] if player else f"ID {pid}",
             "price": int(price), "reveal": reveal,
             "rounds": list(self.round_history), "tocca": bool(tocca),
+            "release_floor_applied": int(release_floor or 0),
         }
 
         deficit = max(0, int(price) - int(squadra["budget"]))
         slots_needed = max(0, len(roster) + 1 - db.MAX_ROSA)
-        if deficit > 0 or slots_needed > 0:
+        keeper_count = sum(1 for g in roster if "P" in (g.get("roles") or []))
+        buying_keeper = bool(player and "P" in (player.get("roles") or []))
+        keeper_release_needed = max(0, keeper_count + (1 if buying_keeper else 0) - db.MAX_GOALKEEPERS)
+        if deficit > 0 or slots_needed > 0 or keeper_release_needed > 0:
             result["needs_release"] = {
                 "team": team, "pid": pid, "price": int(price), "deficit": deficit,
-                "slots_needed": slots_needed, "budget": int(squadra["budget"]),
-                "roster_size": len(roster), "max_roster": db.MAX_ROSA,
+                "slots_needed": slots_needed, "keeper_release_needed": keeper_release_needed,
+                "budget": int(squadra["budget"]), "roster_size": len(roster),
+                "max_roster": db.MAX_ROSA, "max_goalkeepers": db.MAX_GOALKEEPERS,
             }
             self.mode = "release"
             self.deadline = None
@@ -315,17 +329,18 @@ class Auction:
         info = self.last_result.get("needs_release") or {}
         team, pid, price = info.get("team"), info.get("pid"), info.get("price")
         try:
-            released = db.complete_purchase_with_releases(team, pid, price, released_pids)
+            released = db.complete_purchase_with_releases(
+                team, pid, price, released_pids,
+                reveal=self.last_result.get("reveal", {}),
+                rounds=self.last_result.get("rounds", []),
+                tocca=bool(self.last_result.get("tocca")),
+            )
         except ValueError as exc:
             raise AuctionError(str(exc)) from exc
 
         result = dict(self.last_result)
         result["released"] = released
         result.pop("needs_release", None)
-        db.log_event(
-            "assigned", pid, team, int(price), reveal=result.get("reveal", {}),
-            rounds=result.get("rounds", []), released=released, tocca=bool(result.get("tocca")),
-        )
         self.reset(persist=False)
         self.last_result = result
         self._persist()
@@ -356,6 +371,14 @@ class Auction:
             else:
                 own = {"submitted": False, "amount": None, "action": None}
 
+        own_min_bid = None
+        own_release_floor = 0
+        if viewer_team and active and viewer_team in self.eligible_teams:
+            own_release_floor = db.get_release_floor(viewer_team, self.current_pid)
+            own_min_bid = max(1, int(own_release_floor or 0))
+            if self.mode == "tiebreak":
+                own_min_bid = max(own_min_bid, int(self.tiebreak_value or 0) + 1)
+
         release_public = None
         release_private = None
         if self.mode == "release" and self.last_result:
@@ -378,6 +401,8 @@ class Auction:
             "duration": DURATA_ASTA,
             "paused": self.paused,
             "own_response": own,
+            "own_min_bid": own_min_bid,
+            "own_release_floor": int(own_release_floor or 0),
             "release_public": release_public,
             "release_info": release_private,
             "last_result": self.last_result,

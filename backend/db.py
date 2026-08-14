@@ -21,6 +21,9 @@ DB_PATH = os.environ.get("FANTACALCIO_DB", _DEFAULT_DB)
 
 BUDGET_INITIAL = 500
 MAX_ROSA = 35
+MIN_GOALKEEPERS = 2
+MAX_GOALKEEPERS = 5
+MIN_OUTFIELD = 21
 REIMBURSE_RATE = 1.0
 
 
@@ -63,7 +66,8 @@ def init_db():
                 name TEXT NOT NULL,
                 roles TEXT NOT NULL DEFAULT '[]',
                 club TEXT DEFAULT '',
-                img TEXT DEFAULT ''
+                img TEXT DEFAULT '',
+                stats_json TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS roster (
@@ -136,6 +140,10 @@ def init_db():
             conn.execute("ALTER TABLE teams ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
         if "market_finished" not in team_cols:
             conn.execute("ALTER TABLE teams ADD COLUMN market_finished INTEGER NOT NULL DEFAULT 0")
+
+        player_cols = _table_columns(conn, "players")
+        if "stats_json" not in player_cols:
+            conn.execute("ALTER TABLE players ADD COLUMN stats_json TEXT NOT NULL DEFAULT '{}'")
 
         # Il vecchio schema non aveva UNIQUE(pid). Prima di creare l'indice segnaliamo
         # eventuali dati corrotti invece di scegliere arbitrariamente un proprietario.
@@ -411,6 +419,10 @@ def count_rows():
 def _player_row_to_dict(r):
     d = dict(r)
     d["roles"] = json.loads(d.get("roles") or "[]")
+    try:
+        d["stats"] = json.loads(d.pop("stats_json", "{}") or "{}")
+    except Exception:
+        d["stats"] = {}
     return d
 
 
@@ -431,11 +443,16 @@ def replace_catalog(players: list[dict]):
         # Upsert prima, poi elimina solo i giocatori non piu' presenti. In questo
         # modo le FK delle rose esistenti restano valide durante l'aggiornamento.
         conn.executemany(
-            """INSERT INTO players(pid,name,roles,club,img) VALUES (?,?,?,?,?)
+            """INSERT INTO players(pid,name,roles,club,img,stats_json) VALUES (?,?,?,?,?,?)
                ON CONFLICT(pid) DO UPDATE SET
-                 name=excluded.name, roles=excluded.roles, club=excluded.club, img=excluded.img""",
+                 name=excluded.name, roles=excluded.roles, club=excluded.club, img=excluded.img,
+                 stats_json=excluded.stats_json""",
             [
-                (int(p["pid"]), p["name"], json.dumps(p.get("roles", [])), p.get("club", ""), p.get("img", ""))
+                (
+                    int(p["pid"]), p["name"], json.dumps(p.get("roles", [])),
+                    p.get("club", ""), p.get("img", ""),
+                    json.dumps(p.get("stats", {}), ensure_ascii=False),
+                )
                 for p in players
             ],
         )
@@ -533,7 +550,7 @@ def get_roster(team: str):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT r.pid, r.price, p.name, p.roles, p.club, p.img
+            SELECT r.pid, r.price, p.name, p.roles, p.club, p.img, p.stats_json
             FROM roster r JOIN players p ON p.pid=r.pid
             WHERE r.team=?
             """,
@@ -564,19 +581,142 @@ def free_player_ids(exclude_passed: bool = True):
         return [r["pid"] for r in rows]
 
 
+def _is_goalkeeper_roles(roles) -> bool:
+    return "P" in (roles or [])
+
+
+def roster_summary(team: str):
+    roster = get_roster(team)
+    keepers = sum(1 for g in roster if _is_goalkeeper_roles(g.get("roles")))
+    total = len(roster)
+    outfield = total - keepers
+    issues = []
+    if keepers < MIN_GOALKEEPERS:
+        issues.append(f"Servono almeno {MIN_GOALKEEPERS} portieri (ora {keepers}).")
+    if keepers > MAX_GOALKEEPERS:
+        issues.append(f"Puoi avere al massimo {MAX_GOALKEEPERS} portieri (ora {keepers}).")
+    if outfield < MIN_OUTFIELD:
+        issues.append(f"Servono almeno {MIN_OUTFIELD} giocatori di movimento (ora {outfield}).")
+    if total > MAX_ROSA:
+        issues.append(f"La rosa puo' avere al massimo {MAX_ROSA} giocatori (ora {total}).")
+    return {
+        "goalkeepers": keepers,
+        "outfield": outfield,
+        "total": total,
+        "free_slots": max(0, MAX_ROSA-total),
+        "min_goalkeepers": MIN_GOALKEEPERS,
+        "max_goalkeepers": MAX_GOALKEEPERS,
+        "min_outfield": MIN_OUTFIELD,
+        "max_roster": MAX_ROSA,
+        "valid_finish": not issues,
+        "issues": issues,
+    }
+
+
+def _release_events_desc(conn):
+    return conn.execute(
+        "SELECT id,released_json FROM auction_events "
+        "WHERE undone=0 AND event_type='assigned' AND released_json<>'[]' ORDER BY id DESC"
+    ).fetchall()
+
+
+def get_release_floor(team: str, pid: int) -> int:
+    """Ultimo prezzo al quale questa squadra ha svincolato il giocatore."""
+    with get_conn() as conn:
+        for row in _release_events_desc(conn):
+            try:
+                released = json.loads(row["released_json"] or "[]")
+            except Exception:
+                continue
+            for item in released:
+                if int(item.get("pid", -1)) == int(pid) and str(item.get("released_by") or item.get("team") or "") == str(team):
+                    return int(item.get("price") or 0)
+                # Gli eventi v5 non salvavano released_by: appartengono sempre al vincitore/event.team.
+            event_team = conn.execute("SELECT team FROM auction_events WHERE id=?", (row["id"],)).fetchone()
+            if event_team and event_team["team"] == team:
+                for item in released:
+                    if int(item.get("pid", -1)) == int(pid):
+                        return int(item.get("price") or 0)
+    return 0
+
+
+def get_release_floors(team: str) -> dict[int, int]:
+    floors = {}
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT team,released_json FROM auction_events "
+            "WHERE undone=0 AND event_type='assigned' AND released_json<>'[]' ORDER BY id DESC"
+        ).fetchall()
+        for row in rows:
+            if row["team"] != team:
+                continue
+            try:
+                released = json.loads(row["released_json"] or "[]")
+            except Exception:
+                continue
+            for item in released:
+                pid = int(item.get("pid", -1))
+                if pid >= 0 and pid not in floors:
+                    floors[pid] = int(item.get("price") or 0)
+    return floors
+
+
+def get_free_agents(viewer_team: str | None = None):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT p.* FROM players p WHERE p.pid NOT IN (SELECT pid FROM roster) ORDER BY p.name COLLATE NOCASE"
+        ).fetchall()
+        passed = {r["pid"] for r in conn.execute("SELECT pid FROM passed_players").fetchall()}
+    floors = get_release_floors(viewer_team) if viewer_team else {}
+    players = []
+    for row in rows:
+        p = _player_row_to_dict(row)
+        p["passed"] = p["pid"] in passed
+        if viewer_team:
+            p["my_release_floor"] = int(floors.get(int(p["pid"]), 0))
+        players.append(p)
+    stat_keys = []
+    preferred = ["quotazione", "fvm", "fantamedia", "media_voto", "presenze", "gol", "assist", "ammonizioni", "espulsioni", "rigori_segnati"]
+    labels = {
+        "quotazione":"Quotazione", "fvm":"FVM", "fantamedia":"FantaMedia",
+        "media_voto":"Media voto", "presenze":"Presenze", "gol":"Gol",
+        "assist":"Assist", "ammonizioni":"Ammonizioni", "espulsioni":"Espulsioni",
+        "rigori_segnati":"Rigori segnati",
+    }
+    present = {k for p in players for k in (p.get("stats") or {})}
+    for key in preferred:
+        if key in present:
+            stat_keys.append({"key": key, "label": labels[key], "numeric": True})
+    stat_keys.append({"key":"name", "label":"Nome", "numeric":False})
+    return {"players": players, "sort_fields": stat_keys}
+
+
 def assign_player(team: str, pid: int, price: int, charge_budget: bool = True):
     with get_conn() as conn:
         if conn.execute("SELECT 1 FROM roster WHERE pid=?", (pid,)).fetchone():
             raise ValueError("Giocatore gia' assegnato.")
         if not conn.execute("SELECT 1 FROM teams WHERE name=?", (team,)).fetchone():
             raise ValueError("Squadra non trovata.")
+        roster_rows = conn.execute(
+            "SELECT p.roles FROM roster r JOIN players p ON p.pid=r.pid WHERE r.team=?", (team,)
+        ).fetchall()
+        total = len(roster_rows) + 1
+        if total > MAX_ROSA:
+            raise ValueError("Rosa oltre il limite massimo di 35 giocatori.")
+        newp = conn.execute("SELECT roles FROM players WHERE pid=?", (int(pid),)).fetchone()
+        keepers = sum(1 for r in roster_rows if "P" in json.loads(r["roles"] or "[]"))
+        if newp and "P" in json.loads(newp["roles"] or "[]"):
+            keepers += 1
+        if keepers > MAX_GOALKEEPERS:
+            raise ValueError("Puoi avere al massimo 5 portieri: devi svincolarne uno.")
         conn.execute("INSERT INTO roster(team,pid,price) VALUES (?,?,?)", (team, pid, int(price)))
+        conn.execute("DELETE FROM passed_players WHERE pid=?", (int(pid),))
         if charge_budget:
             conn.execute("UPDATE teams SET budget=budget-? WHERE name=?", (int(price), team))
         conn.commit()
 
 
-def complete_purchase_with_releases(team: str, pid: int, price: int, released_pids: list[int]):
+def complete_purchase_with_releases(team: str, pid: int, price: int, released_pids: list[int], reveal: dict | None = None, rounds: list | None = None, tocca: bool = False):
     """Svincoli + acquisto in una singola transazione."""
     released_pids = list(dict.fromkeys(int(p) for p in released_pids))
     with get_conn() as conn:
@@ -585,28 +725,61 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
             raise ValueError("Squadra non trovata.")
         if conn.execute("SELECT 1 FROM roster WHERE pid=?", (pid,)).fetchone():
             raise ValueError("Giocatore gia' assegnato.")
-        rows = conn.execute("SELECT pid,price FROM roster WHERE team=?", (team,)).fetchall()
-        rosa = {r["pid"]: r["price"] for r in rows}
+        rows = conn.execute(
+            "SELECT r.pid,r.price,p.roles FROM roster r JOIN players p ON p.pid=r.pid WHERE r.team=?",
+            (team,),
+        ).fetchall()
+        rosa = {r["pid"]: {"price": r["price"], "roles": json.loads(r["roles"] or "[]")} for r in rows}
         if any(p not in rosa for p in released_pids):
             raise ValueError("Uno o piu' giocatori selezionati non appartengono alla squadra.")
-        refund = sum(int(REIMBURSE_RATE * rosa[p]) for p in released_pids)
+        refund = sum(int(REIMBURSE_RATE * rosa[p]["price"]) for p in released_pids)
         if squadra["budget"] + refund < int(price):
             raise ValueError("Crediti insufficienti anche dopo gli svincoli selezionati.")
-        if len(rosa) - len(released_pids) + 1 > MAX_ROSA:
+
+        final_total = len(rosa) - len(released_pids) + 1
+        if final_total > MAX_ROSA:
             raise ValueError("Devi liberare altri posti in rosa.")
+        newp = conn.execute("SELECT roles FROM players WHERE pid=?", (int(pid),)).fetchone()
+        new_roles = json.loads(newp["roles"] or "[]") if newp else []
+        keepers = sum(1 for p, info in rosa.items() if p not in released_pids and "P" in info["roles"])
+        if "P" in new_roles:
+            keepers += 1
+        if keepers > MAX_GOALKEEPERS:
+            raise ValueError("Puoi avere al massimo 5 portieri: svincola almeno un portiere.")
+
         released = []
         for p in released_pids:
-            prow = conn.execute("SELECT name, roles, club FROM players WHERE pid=?", (p,)).fetchone()
+            prow = conn.execute("SELECT name, roles, club, img FROM players WHERE pid=?", (p,)).fetchone()
             released.append({
                 "pid": p,
-                "price": rosa[p],
+                "price": int(rosa[p]["price"]),
                 "name": prow["name"] if prow else f"ID {p}",
                 "roles": json.loads(prow["roles"] or "[]") if prow else [],
                 "club": prow["club"] if prow else "",
+                "img": prow["img"] if prow else "",
+                "released_by": team,
             })
             conn.execute("DELETE FROM roster WHERE team=? AND pid=?", (team, p))
+            # Uno svincolato deve tornare immediatamente astabile anche se in
+            # passato era stato segnato come PASSATO.
+            conn.execute("DELETE FROM passed_players WHERE pid=?", (p,))
         conn.execute("UPDATE teams SET budget=budget+?-? WHERE name=?", (refund, int(price), team))
         conn.execute("INSERT INTO roster(team,pid,price) VALUES (?,?,?)", (team, int(pid), int(price)))
+        conn.execute("DELETE FROM passed_players WHERE pid=?", (int(pid),))
+        # Storico e svincoli vengono committati insieme: se il processo cade,
+        # non puo' esistere uno svincolo senza la traccia necessaria alla regola
+        # del prezzo minimo di riacquisto.
+        conn.execute(
+            """INSERT INTO auction_events(ts,event_type,pid,team,price,reveal_json,rounds_json,released_json,tocca)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                _dt.datetime.now().isoformat(timespec="seconds"), "assigned", int(pid), team, int(price),
+                json.dumps(reveal or {}, ensure_ascii=False),
+                json.dumps(rounds or [], ensure_ascii=False),
+                json.dumps(released, ensure_ascii=False),
+                1 if tocca else 0,
+            ),
+        )
         conn.commit()
         return released
 
@@ -752,12 +925,13 @@ def get_auction_history(limit: int = 100):
             d["rounds"] = json.loads(d.pop("rounds_json") or "[]")
             d["released"] = json.loads(d.pop("released_json") or "[]")
             for rel in d["released"]:
-                if not rel.get("name") and rel.get("pid") is not None:
-                    prow = conn.execute("SELECT name, roles, club FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
+                if rel.get("pid") is not None and (not rel.get("name") or not rel.get("img")):
+                    prow = conn.execute("SELECT name, roles, club, img FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
                     if prow:
-                        rel["name"] = prow["name"]
-                        rel["roles"] = json.loads(prow["roles"] or "[]")
-                        rel["club"] = prow["club"] or ""
+                        rel.setdefault("name", prow["name"])
+                        rel.setdefault("roles", json.loads(prow["roles"] or "[]"))
+                        rel.setdefault("club", prow["club"] or "")
+                        rel.setdefault("img", prow["img"] or "")
             d["player_roles"] = json.loads(d.get("player_roles") or "[]")
             d["tocca"] = bool(d["tocca"])
             out.append(d)
