@@ -143,3 +143,7 @@ Non serve configurare manualmente le chiavi. Facoltativamente si può impostare 
 - Risultato PASSATO semplificato: “Tutti i Rannatoni hanno passato”, senza tendina offerte.
 - Barra filtri ruolo mobile con posizione conservata/centrata e padding finale per non tagliare PC/Tutti.
 - Palette badge ruolo unificata in tutta l’app.
+
+## Statistiche opzionali (v8)
+
+Il file statistiche non è necessario per avviare l’asta. Catalogo e Rose sono indipendenti dalle statistiche. Sono supportati CSV/XLSX con ID e i file Strategia/FantaLab senza ID: in questo secondo caso il collegamento avviene tramite nome breve + squadra. I giocatori senza match rimangono normalmente astabili e visibili, semplicemente senza dati statistici.

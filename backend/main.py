@@ -439,9 +439,15 @@ async def upload_statistics(file: UploadFile = File(...), _: dict = Depends(requ
         if name.endswith((".xlsx", ".xlsm")):
             from openpyxl import load_workbook
             wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-            ws = wb.active
-            rows = [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)]
-            parsed = csv_parser.parse_stats_rows(rows)
+            parts = []
+            for ws in wb.worksheets:
+                rows = [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)]
+                part = csv_parser.parse_stats_rows(rows)
+                # Nei file Strategia/FantaLab ogni ruolo e' su un foglio diverso.
+                # Fogli di servizio senza statistiche vengono semplicemente ignorati.
+                if part.get("records"):
+                    parts.append(part)
+            parsed = csv_parser.merge_stats_results(parts)
         else:
             parsed = csv_parser.parse_stats_csv(raw.decode("utf-8-sig", errors="replace"))
     except Exception as exc:

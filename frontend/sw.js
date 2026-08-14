@@ -1,4 +1,4 @@
-const CACHE='rannatoni-shell-v7';
+const CACHE='rannatoni-shell-v8';
 const ASSETS=[
   '/static/style.css',
   '/static/icon-192.png',

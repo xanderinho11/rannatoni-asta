@@ -9,16 +9,16 @@ ALLOWED_MANTRA_ROLES = {"P", "Ds", "Dc", "Dd", "E", "M", "C", "W", "T", "A", "Pc
 
 
 STAT_HEADER_ALIASES = {
-    "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "qt"},
+    "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "qt", "quo"},
     "fvm": {"fvm", "fanta valore di mercato", "fantavalore", "fanta valore"},
-    "fantamedia": {"fm", "fantamedia", "fanta media"},
+    "fantamedia": {"fm", "fmv", "fantamedia", "fanta media", "fanta media voto"},
     "media_voto": {"mv", "media voto", "media voti", "media"},
     "presenze": {"pv", "presenze", "presenza"},
     "gol": {"gf", "gol", "goal", "reti"},
     "assist": {"ass", "assist"},
     "ammonizioni": {"amm", "ammonizioni"},
     "espulsioni": {"esp", "espulsioni"},
-    "rigori_segnati": {"rf", "rigori segnati", "rigori fatti"},
+    "rigori_segnati": {"rf", "rigori segnati", "rigori fatti", "rig segnati", "rig. segnati", "rig segn."},
     "pma": {"pma", "prezzo medio asta", "prezzo medio", "pma 12", "pma fantalab"},
     "titolarita": {"titolarita", "titolarità", "% titolare", "percentuale titolare", "titolare"},
     "gol_subiti": {"gs", "gol subiti", "reti subite"},
@@ -287,7 +287,17 @@ def parse_catalog_csv(text: str):
 
 
 
-IDENTITY_HEADERS = {"id", "id giocatore", "id calciatore", "codice", "cod", "nome", "nome completo", "calciatore", "giocatore", "squadra", "team", "ruolo", "ruoli"}
+IDENTITY_HEADERS = {
+    "id", "id giocatore", "id calciatore", "codice", "cod",
+    "nome", "nome completo", "calciatore", "giocatore",
+    "squadra", "team", "club", "ruolo", "ruoli",
+    "prezzo", "fascia", "obiett", "obiett.", "commento",
+}
+
+_NAME_ALIASES = {"nome", "nome completo", "calciatore", "giocatore"}
+_CLUB_ALIASES = {"squadra", "team", "club"}
+_ID_ALIASES = {"id", "id giocatore", "id calciatore", "codice", "cod"}
+
 
 def _safe_stat_key(label: str):
     import re, unicodedata
@@ -295,42 +305,67 @@ def _safe_stat_key(label: str):
     raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
     return raw[:40] or "dato"
 
+
+def _find_header(rows: list[list[str]]):
+    """Trova una riga intestazione valida nelle prime 15 righe.
+
+    Il file statistiche puo' usare un ID oppure, come Strategia/FantaLab,
+    Nome + Team. Il file statistiche e' sempre un arricchimento opzionale:
+    non influenza Catalogo, Rose o squadre.
+    """
+    for ri, row in enumerate(rows[:15]):
+        norm = [_norm_header(c) for c in row]
+        id_idx = next((norm.index(x) for x in _ID_ALIASES if x in norm), None)
+        name_idx = next((norm.index(x) for x in _NAME_ALIASES if x in norm), None)
+        club_idx = next((norm.index(x) for x in _CLUB_ALIASES if x in norm), None)
+        if id_idx is not None or name_idx is not None:
+            return ri, id_idx, name_idx, club_idx
+    return None, None, None, None
+
+
 def parse_stats_rows(rows: list[list[str]]):
-    """Importa un file statistiche separato collegandolo ai giocatori per ID.
+    """Importa statistiche opzionali.
+
+    Supporta due modalita' di collegamento:
+    - ID giocatore, se il file lo contiene;
+    - Nome breve + Team, come nei file Strategia/FantaLab.
+
     Riconosce le metriche note e conserva anche colonne numeriche aggiuntive.
     """
     result = {"records": [], "errors": [], "labels": {}}
     if not rows:
         result["errors"].append("File statistiche vuoto.")
         return result
-    # Cerca la riga intestazione nelle prime 12 righe.
-    header_idx = None
-    id_idx = None
-    for ri, row in enumerate(rows[:12]):
-        norm = [_norm_header(c) for c in row]
-        for alias in ("id", "id giocatore", "id calciatore", "codice", "cod"):
-            if alias in norm:
-                header_idx, id_idx = ri, norm.index(alias)
-                break
-        if header_idx is not None:
-            break
+
+    header_idx, id_idx, name_idx, club_idx = _find_header(rows)
     if header_idx is None:
-        result["errors"].append("Non trovo una colonna ID nel file statistiche.")
+        result["errors"].append("Non trovo una riga intestazione con ID oppure Nome nel file statistiche.")
         return result
+
     header = list(rows[header_idx])
-    norm_header = [_norm_header(c) for c in header]
     known = _stat_columns(header)
     col_to_key = {}
     for key, idx in known.items():
         col_to_key[idx] = key
-        result["labels"][key] = STAT_LABELS.get(key, header[idx].strip() or key)
+        result["labels"][key] = STAT_LABELS.get(key, str(header[idx]).strip() or key)
     used = set(col_to_key.values())
-    # Colonne numeriche sconosciute: le importiamo dinamicamente.
+
+    # Colonne che non sono statistiche anche se numeriche nel file Strategia.
+    ignored_dynamic = {
+        "prezzo", "fascia", "obiett", "obiett.", "commento",
+        "nota 1", "nota 2", "nota 3", "nota 4", "nota 5",
+        "ruolo", "ruoli", "nome", "nome completo", "calciatore", "giocatore",
+        "squadra", "team", "club", "id", "id giocatore", "id calciatore", "codice", "cod",
+    }
+
+    # Colonne numeriche sconosciute: import dinamico (es. Affidabilita',
+    # Integrita', FMV Exp., Pt. Tit., Minuti, Pt. Inf., Rig. Sbagliati).
     for idx, label in enumerate(header):
-        if idx == id_idx or _norm_header(label) in IDENTITY_HEADERS or idx in col_to_key or not str(label).strip():
+        norm_label = _norm_header(label)
+        if idx in {id_idx, name_idx, club_idx} or norm_label in ignored_dynamic or idx in col_to_key or not str(label).strip():
             continue
         vals = []
-        for row in rows[header_idx+1:header_idx+16]:
+        for row in rows[header_idx + 1:header_idx + 30]:
             if idx < len(row):
                 v = _parse_stat_number(row[idx])
                 if v is not None:
@@ -338,31 +373,80 @@ def parse_stats_rows(rows: list[list[str]]):
         if not vals:
             continue
         key = _safe_stat_key(label)
-        base = key; n = 2
+        base = key
+        n = 2
         while key in used:
-            key = f"{base}_{n}"; n += 1
-        used.add(key); col_to_key[idx] = key; result["labels"][key] = str(label).strip()
-    seen = set()
-    for ri, row in enumerate(rows[header_idx+1:], start=header_idx+2):
-        if id_idx >= len(row) or not str(row[id_idx]).strip():
+            key = f"{base}_{n}"
+            n += 1
+        used.add(key)
+        col_to_key[idx] = key
+        result["labels"][key] = str(label).strip()
+
+    # I multiruolo possono comparire su piu' fogli FantaLab. Qui deduplichiamo
+    # l'identita' mantenendo/accorpando tutte le metriche disponibili.
+    records_by_identity = {}
+    for row in rows[header_idx + 1:]:
+        pid = None
+        if id_idx is not None and id_idx < len(row) and str(row[id_idx]).strip():
+            try:
+                pid = int(float(str(row[id_idx]).strip().replace(',', '.')))
+            except ValueError:
+                pid = None
+
+        name = str(row[name_idx]).strip() if name_idx is not None and name_idx < len(row) else ""
+        club = str(row[club_idx]).strip() if club_idx is not None and club_idx < len(row) else ""
+        if pid is None and not name:
             continue
-        try:
-            pid = int(float(str(row[id_idx]).strip().replace(',', '.')))
-        except ValueError:
-            continue
-        if pid in seen:
-            continue
-        seen.add(pid)
+
         stats = {}
         for idx, key in col_to_key.items():
             if idx < len(row):
                 v = _parse_stat_number(row[idx])
                 if v is not None:
                     stats[key] = v
-        result["records"].append({"pid": pid, "stats": stats})
+        if not stats:
+            # La riga puo' essere valida anche senza metriche, ma non porta
+            # alcun arricchimento e quindi non serve salvarla.
+            continue
+
+        identity = ("pid", pid) if pid is not None else ("name", _norm_header(name), _norm_header(club))
+        rec = records_by_identity.setdefault(identity, {"stats": {}})
+        if pid is not None:
+            rec["pid"] = pid
+        if name:
+            rec["name"] = name
+        if club:
+            rec["club"] = club
+        rec["stats"].update(stats)
+
+    result["records"] = list(records_by_identity.values())
     if not result["records"]:
         result["errors"].append("Nessuna riga statistica valida trovata.")
     return result
+
+
+def merge_stats_results(parts: list[dict]):
+    """Unisce i risultati di piu' fogli XLSX (es. Por, Dc, B, ...)."""
+    out = {"records": [], "errors": [], "labels": {}}
+    merged = {}
+    for part in parts:
+        out["labels"].update(part.get("labels") or {})
+        for rec in part.get("records") or []:
+            if rec.get("pid") is not None:
+                identity = ("pid", int(rec["pid"]))
+            else:
+                identity = ("name", _norm_header(rec.get("name", "")), _norm_header(rec.get("club", "")))
+            target = merged.setdefault(identity, {"stats": {}})
+            for k in ("pid", "name", "club"):
+                if rec.get(k) not in (None, ""):
+                    target[k] = rec[k]
+            target["stats"].update(rec.get("stats") or {})
+    out["records"] = list(merged.values())
+    if not out["records"]:
+        errs = [e for p in parts for e in (p.get("errors") or [])]
+        out["errors"] = errs[:30] or ["Nessuna riga statistica valida trovata."]
+    return out
+
 
 def parse_stats_csv(text: str):
     return parse_stats_rows(_read_csv_rows(text))

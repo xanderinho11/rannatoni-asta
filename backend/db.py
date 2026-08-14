@@ -11,7 +11,9 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import unicodedata
 import shutil
 import sqlite3
 from contextlib import contextmanager
@@ -466,26 +468,127 @@ def replace_catalog(players: list[dict]):
 
 
 
+_CLUB_CODE_TO_NAMES = {
+    "ATA": {"atalanta"}, "BOL": {"bologna"}, "CAG": {"cagliari"},
+    "COM": {"como"}, "CRE": {"cremonese"}, "EMP": {"empoli"},
+    "FIO": {"fiorentina"}, "FRO": {"frosinone"}, "GEN": {"genoa"},
+    "INT": {"inter", "internazionale"}, "JUV": {"juventus"},
+    "LAZ": {"lazio"}, "LEC": {"lecce"}, "MIL": {"milan"},
+    "MON": {"monza"}, "NAP": {"napoli"}, "PAR": {"parma"},
+    "PIS": {"pisa"}, "ROM": {"roma"}, "SAS": {"sassuolo"},
+    "TOR": {"torino"}, "UDI": {"udinese"},
+    "VER": {"verona", "hellas verona"}, "VEN": {"venezia"},
+}
+
+
+def _norm_identity_text(value: str) -> str:
+    raw = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", raw).split())
+
+
+def _club_keys(value: str) -> set[str]:
+    """Chiavi equivalenti per club: nome esteso e codice FantaLab."""
+    raw = str(value or "").strip()
+    if not raw:
+        return set()
+    norm = _norm_identity_text(raw)
+    keys = {norm}
+    upper = raw.upper().strip()
+    if upper in _CLUB_CODE_TO_NAMES:
+        keys.update(_CLUB_CODE_TO_NAMES[upper])
+        keys.add(_norm_identity_text(upper))
+    for code, names in _CLUB_CODE_TO_NAMES.items():
+        if norm in names:
+            keys.add(_norm_identity_text(code))
+            keys.update(names)
+    return {x for x in keys if x}
+
+
 def update_player_stats(records: list[dict], labels: dict | None = None):
-    """Aggiorna solo le statistiche dei giocatori esistenti, collegandole per ID."""
+    """Sostituisce le statistiche opzionali del catalogo.
+
+    Collegamento preferito per ID; se l'ID non e' presente (es. Strategia
+    FantaLab) usa Nome breve + Squadra. Le statistiche non influenzano mai
+    Rose, squadre o possibilita' di avviare l'asta.
+    """
     labels = labels or {}
-    matched = 0
-    supplied = {int(r["pid"]) for r in records}
     with get_conn() as conn:
-        catalog_ids = {int(r["pid"]) for r in conn.execute("SELECT pid FROM players").fetchall()}
+        rows = conn.execute("SELECT pid,name,full_name,club FROM players").fetchall()
+        catalog = [dict(r) for r in rows]
+        catalog_ids = {int(r["pid"]) for r in catalog}
+
+        by_name = {}
+        for p in catalog:
+            for raw_name in (p.get("name"), p.get("full_name")):
+                nk = _norm_identity_text(raw_name)
+                if nk:
+                    by_name.setdefault(nk, set()).add(int(p["pid"]))
+
+        player_by_id = {int(p["pid"]): p for p in catalog}
+        matched_stats = {}
+        unmatched_source = 0
+        source_total = 0
+        match_by_id = 0
+        match_by_name_team = 0
+
         for rec in records:
-            pid = int(rec["pid"])
-            if pid not in catalog_ids:
+            source_total += 1
+            pid = None
+            rec_pid = rec.get("pid")
+            if rec_pid is not None:
+                try:
+                    candidate = int(rec_pid)
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate in catalog_ids:
+                    pid = candidate
+                    match_by_id += 1
+
+            if pid is None and rec.get("name"):
+                nk = _norm_identity_text(rec.get("name"))
+                candidates = set(by_name.get(nk, set()))
+                rec_club_keys = _club_keys(rec.get("club", ""))
+                if rec_club_keys:
+                    candidates = {
+                        c for c in candidates
+                        if rec_club_keys & _club_keys(player_by_id[c].get("club", ""))
+                    }
+                # Se il file non indica il club, accettiamo solo un nome univoco.
+                if len(candidates) == 1:
+                    pid = next(iter(candidates))
+                    match_by_name_team += 1
+
+            if pid is None:
+                unmatched_source += 1
                 continue
-            row = conn.execute("SELECT stats_json FROM players WHERE pid=?", (pid,)).fetchone()
-            try: current = json.loads(row["stats_json"] or "{}") if row else {}
-            except Exception: current = {}
-            current.update(rec.get("stats") or {})
-            conn.execute("UPDATE players SET stats_json=? WHERE pid=?", (json.dumps(current, ensure_ascii=False), pid))
-            matched += 1
-        conn.execute("INSERT INTO settings(key,value) VALUES('stats_labels',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(labels, ensure_ascii=False),))
+            matched_stats.setdefault(pid, {}).update(rec.get("stats") or {})
+
+        # Un nuovo file statistiche sostituisce il precedente: in questo modo
+        # chi non trova corrispondenza resta davvero senza dato e finisce in fondo.
+        conn.execute("UPDATE players SET stats_json='{}'")
+        for pid, stats in matched_stats.items():
+            conn.execute(
+                "UPDATE players SET stats_json=? WHERE pid=?",
+                (json.dumps(stats, ensure_ascii=False), int(pid)),
+            )
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('stats_labels',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps(labels, ensure_ascii=False),),
+        )
         conn.commit()
-    return {"matched": matched, "stats_without_catalog": len(supplied-catalog_ids), "catalog_without_stats": len(catalog_ids-supplied), "catalog_total": len(catalog_ids), "stats_total": len(supplied)}
+
+    matched_ids = set(matched_stats)
+    return {
+        "matched": len(matched_ids),
+        "stats_without_catalog": unmatched_source,
+        "catalog_without_stats": len(catalog_ids - matched_ids),
+        "catalog_total": len(catalog_ids),
+        "stats_total": source_total,
+        "matched_by_id": match_by_id,
+        "matched_by_name_team": match_by_name_team,
+    }
+
 
 def get_stats_labels():
     raw = get_setting("stats_labels", "{}")
