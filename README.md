@@ -1,6 +1,6 @@
-# Rannatoni v6 — locale + Railway
+# Rannatoni v7 — locale + Railway
 
-Web-app/PWA per l'asta di riparazione della lega **Rannatoni**. La v6 gira in locale e contiene già la configurazione per il deploy Railway.
+Web-app/PWA per l'asta di riparazione della lega **Rannatoni**. La v7 gira in locale e contiene già la configurazione per il deploy Railway.
 
 ## Avvio locale su Windows
 
@@ -15,11 +15,12 @@ Password locale predefinita: **`asta2026`**.
 ## Preparazione
 
 1. Carica **Catalogo**.
-2. Carica **Rose**.
-3. Configura username, residui e gestore.
-4. Per gli account nuovi genera un **PIN temporaneo**.
-5. Salva e distribuisci username + PIN temporaneo.
-6. Premi **Entra nell'asta come gestore**.
+2. Facoltativo: carica **Statistiche** FantaLab (CSV/XLSX), collegate per ID.
+3. Carica **Rose**.
+4. Configura username, residui e gestore.
+5. Per gli account nuovi genera un **PIN temporaneo**.
+6. Salva e distribuisci username + PIN temporaneo.
+7. Premi **Entra nell'asta come gestore**.
 
 ### Privacy PIN
 
@@ -130,3 +131,15 @@ La build online si rifiuta di partire con la password locale `asta2026`.
 La v5 aggiunge Web Push reali per i Rannatoni partecipanti. Le chiavi VAPID vengono generate automaticamente al primo avvio e salvate nella cartella `data/`, quindi su Railway restano persistenti nel volume montato su `/app/data`.
 
 Non serve configurare manualmente le chiavi. Facoltativamente si può impostare la variabile `VAPID_SUBJECT` con un contatto `mailto:` o URL.
+
+
+## Novità v7
+
+- Il nome mostrato dei calciatori usa la colonna breve/cognome del Catalogo; il nome completo resta ricercabile e visibile nella scheda.
+- Upload separato **Statistiche giocatori** CSV/XLSX con merge tramite ID e riepilogo dei match.
+- Svincolati ordinabili per le statistiche disponibili; chi non ha il dato resta sempre in fondo.
+- Toccando un calciatore da Asta, Rose, Svincolati, Storico o ricerca manuale si apre la scheda statistiche senza uscire dalla schermata.
+- Ricerca manuale con foto, badge ruolo e squadra.
+- Risultato PASSATO semplificato: “Tutti i Rannatoni hanno passato”, senza tendina offerte.
+- Barra filtri ruolo mobile con posizione conservata/centrata e padding finale per non tagliare PC/Tutti.
+- Palette badge ruolo unificata in tutta l’app.

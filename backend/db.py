@@ -64,6 +64,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS players (
                 pid INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
+                full_name TEXT NOT NULL DEFAULT '',
                 roles TEXT NOT NULL DEFAULT '[]',
                 club TEXT DEFAULT '',
                 img TEXT DEFAULT '',
@@ -144,6 +145,9 @@ def init_db():
         player_cols = _table_columns(conn, "players")
         if "stats_json" not in player_cols:
             conn.execute("ALTER TABLE players ADD COLUMN stats_json TEXT NOT NULL DEFAULT '{}'")
+        if "full_name" not in player_cols:
+            conn.execute("ALTER TABLE players ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE players SET full_name=name WHERE full_name='' OR full_name IS NULL")
 
         # Il vecchio schema non aveva UNIQUE(pid). Prima di creare l'indice segnaliamo
         # eventuali dati corrotti invece di scegliere arbitrariamente un proprietario.
@@ -443,13 +447,13 @@ def replace_catalog(players: list[dict]):
         # Upsert prima, poi elimina solo i giocatori non piu' presenti. In questo
         # modo le FK delle rose esistenti restano valide durante l'aggiornamento.
         conn.executemany(
-            """INSERT INTO players(pid,name,roles,club,img,stats_json) VALUES (?,?,?,?,?,?)
+            """INSERT INTO players(pid,name,full_name,roles,club,img,stats_json) VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(pid) DO UPDATE SET
-                 name=excluded.name, roles=excluded.roles, club=excluded.club, img=excluded.img,
+                 name=excluded.name, full_name=excluded.full_name, roles=excluded.roles, club=excluded.club, img=excluded.img,
                  stats_json=excluded.stats_json""",
             [
                 (
-                    int(p["pid"]), p["name"], json.dumps(p.get("roles", [])),
+                    int(p["pid"]), p["name"], p.get("full_name") or p["name"], json.dumps(p.get("roles", [])),
                     p.get("club", ""), p.get("img", ""),
                     json.dumps(p.get("stats", {}), ensure_ascii=False),
                 )
@@ -460,6 +464,33 @@ def replace_catalog(players: list[dict]):
         conn.execute(f"DELETE FROM players WHERE pid NOT IN ({placeholders})", ids)
         conn.commit()
 
+
+
+def update_player_stats(records: list[dict], labels: dict | None = None):
+    """Aggiorna solo le statistiche dei giocatori esistenti, collegandole per ID."""
+    labels = labels or {}
+    matched = 0
+    supplied = {int(r["pid"]) for r in records}
+    with get_conn() as conn:
+        catalog_ids = {int(r["pid"]) for r in conn.execute("SELECT pid FROM players").fetchall()}
+        for rec in records:
+            pid = int(rec["pid"])
+            if pid not in catalog_ids:
+                continue
+            row = conn.execute("SELECT stats_json FROM players WHERE pid=?", (pid,)).fetchone()
+            try: current = json.loads(row["stats_json"] or "{}") if row else {}
+            except Exception: current = {}
+            current.update(rec.get("stats") or {})
+            conn.execute("UPDATE players SET stats_json=? WHERE pid=?", (json.dumps(current, ensure_ascii=False), pid))
+            matched += 1
+        conn.execute("INSERT INTO settings(key,value) VALUES('stats_labels',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(labels, ensure_ascii=False),))
+        conn.commit()
+    return {"matched": matched, "stats_without_catalog": len(supplied-catalog_ids), "catalog_without_stats": len(catalog_ids-supplied), "catalog_total": len(catalog_ids), "stats_total": len(supplied)}
+
+def get_stats_labels():
+    raw = get_setting("stats_labels", "{}")
+    try: return json.loads(raw or "{}")
+    except Exception: return {}
 
 def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
     """Sostituisce atomicamente le rose iniziali preservando la configurazione
@@ -536,11 +567,11 @@ def search_players(query: str, limit: int = 30, exclude_assigned: bool = True):
         rows = conn.execute(
             """
             SELECT p.* FROM players p
-            WHERE lower(p.name) LIKE ?
+            WHERE (lower(p.name) LIKE ? OR lower(p.full_name) LIKE ?)
               AND (?=0 OR p.pid NOT IN (SELECT pid FROM roster))
             ORDER BY p.name COLLATE NOCASE LIMIT ?
             """,
-            (q, 1 if exclude_assigned else 0, int(limit)),
+            (q, q, 1 if exclude_assigned else 0, int(limit)),
         ).fetchall()
         return [_player_row_to_dict(r) for r in rows]
 
@@ -550,7 +581,7 @@ def get_roster(team: str):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT r.pid, r.price, p.name, p.roles, p.club, p.img, p.stats_json
+            SELECT r.pid, r.price, p.name, p.full_name, p.roles, p.club, p.img, p.stats_json
             FROM roster r JOIN players p ON p.pid=r.pid
             WHERE r.team=?
             """,
@@ -681,12 +712,14 @@ def get_free_agents(viewer_team: str | None = None):
         "quotazione":"Quotazione", "fvm":"FVM", "fantamedia":"FantaMedia",
         "media_voto":"Media voto", "presenze":"Presenze", "gol":"Gol",
         "assist":"Assist", "ammonizioni":"Ammonizioni", "espulsioni":"Espulsioni",
-        "rigori_segnati":"Rigori segnati",
+        "rigori_segnati":"Rigori segnati", "pma":"PMA", "titolarita":"Titolarità",
+        "gol_subiti":"Gol subiti", "rigori_parati":"Rigori parati",
     }
+    labels.update(get_stats_labels())
     present = {k for p in players for k in (p.get("stats") or {})}
-    for key in preferred:
-        if key in present:
-            stat_keys.append({"key": key, "label": labels[key], "numeric": True})
+    for key in preferred + [k for k in labels if k not in preferred]:
+        if key in present and not any(x["key"] == key for x in stat_keys):
+            stat_keys.append({"key": key, "label": labels.get(key,key.replace('_',' ').title()), "numeric": True})
     stat_keys.append({"key":"name", "label":"Nome", "numeric":False})
     return {"players": players, "sort_fields": stat_keys}
 
@@ -749,12 +782,14 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
 
         released = []
         for p in released_pids:
-            prow = conn.execute("SELECT name, roles, club, img FROM players WHERE pid=?", (p,)).fetchone()
+            prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json FROM players WHERE pid=?", (p,)).fetchone()
             released.append({
                 "pid": p,
                 "price": int(rosa[p]["price"]),
                 "name": prow["name"] if prow else f"ID {p}",
+                "full_name": (prow["full_name"] or prow["name"]) if prow else f"ID {p}",
                 "roles": json.loads(prow["roles"] or "[]") if prow else [],
+                "stats": json.loads(prow["stats_json"] or "{}") if prow else {},
                 "club": prow["club"] if prow else "",
                 "img": prow["img"] if prow else "",
                 "released_by": team,
@@ -912,7 +947,7 @@ def get_auction_history(limit: int = 100):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT e.*, p.name AS player_name, p.roles AS player_roles, p.club AS player_club, p.img AS player_img
+            SELECT e.*, p.name AS player_name, p.full_name AS player_full_name, p.roles AS player_roles, p.club AS player_club, p.img AS player_img, p.stats_json AS player_stats_json
             FROM auction_events e LEFT JOIN players p ON p.pid=e.pid
             WHERE e.undone=0 ORDER BY e.id DESC LIMIT ?
             """,
@@ -926,13 +961,20 @@ def get_auction_history(limit: int = 100):
             d["released"] = json.loads(d.pop("released_json") or "[]")
             for rel in d["released"]:
                 if rel.get("pid") is not None and (not rel.get("name") or not rel.get("img")):
-                    prow = conn.execute("SELECT name, roles, club, img FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
+                    prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
                     if prow:
                         rel.setdefault("name", prow["name"])
+                        rel.setdefault("full_name", prow["full_name"] or prow["name"])
                         rel.setdefault("roles", json.loads(prow["roles"] or "[]"))
+                        try: rel.setdefault("stats", json.loads(prow["stats_json"] or "{}"))
+                        except Exception: rel.setdefault("stats", {})
                         rel.setdefault("club", prow["club"] or "")
                         rel.setdefault("img", prow["img"] or "")
             d["player_roles"] = json.loads(d.get("player_roles") or "[]")
+            try:
+                d["player_stats"] = json.loads(d.pop("player_stats_json", "{}") or "{}")
+            except Exception:
+                d["player_stats"] = {}
             d["tocca"] = bool(d["tocca"])
             out.append(d)
         return out

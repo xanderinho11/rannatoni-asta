@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import io
 import json
 import os
 import re
@@ -428,6 +429,30 @@ async def upload_catalog(file: UploadFile = File(...), _: dict = Depends(require
     return {"ok": True, "players_loaded": len(parsed["players"])}
 
 
+@app.post("/api/admin/upload/statistics")
+async def upload_statistics(file: UploadFile = File(...), _: dict = Depends(require_superadmin)):
+    raw = await file.read()
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(413, "File troppo grande (massimo 12 MB).")
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith((".xlsx", ".xlsm")):
+            from openpyxl import load_workbook
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            ws = wb.active
+            rows = [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)]
+            parsed = csv_parser.parse_stats_rows(rows)
+        else:
+            parsed = csv_parser.parse_stats_csv(raw.decode("utf-8-sig", errors="replace"))
+    except Exception as exc:
+        raise HTTPException(400, f"Impossibile leggere il file statistiche: {exc}") from exc
+    if parsed["errors"]:
+        raise HTTPException(400, {"message": "Statistiche non importate.", "errors": parsed["errors"][:30]})
+    summary = db.update_player_stats(parsed["records"], parsed.get("labels") or {})
+    storage.salva("statistiche")
+    return {"ok": True, **summary, "fields": list((parsed.get("labels") or {}).values())}
+
+
 @app.post("/api/admin/upload/rosters")
 async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require_superadmin)):
     raw = await file.read()
@@ -562,6 +587,15 @@ def my_roster(session: dict = Depends(require_team)):
     return db.get_roster(session["team"])
 
 
+@app.get("/api/player/{pid}")
+def player_detail(pid: int, session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    p = db.get_player(pid)
+    if not p:
+        raise HTTPException(404, "Calciatore non trovato.")
+    return {"player": p, "stat_labels": db.get_stats_labels()}
+
+
 @app.get("/api/history")
 def history(_: dict = Depends(require_team)):
     return db.get_auction_history(120)
@@ -619,6 +653,14 @@ async def change_pin(body: ChangePinBody, session: dict = Depends(require_team))
 @app.get("/api/spectator/state")
 def spectator_state(_: dict = Depends(require_spectator)):
     return build_state(None)
+
+
+@app.get("/api/spectator/player/{pid}")
+def spectator_player_detail(pid: int, _: dict = Depends(require_spectator)):
+    p = db.get_player(pid)
+    if not p:
+        raise HTTPException(404, "Calciatore non trovato.")
+    return {"player": p, "stat_labels": db.get_stats_labels()}
 
 
 @app.get("/api/spectator/history")

@@ -34,6 +34,13 @@
     </section>
 
     <section class="card">
+      <h2>Statistiche giocatori <span class="badge gray">opzionale</span></h2>
+      <p class="small muted">Puoi caricare un file FantaLab CSV/XLSX: viene collegato al catalogo tramite ID e aggiunge dati per filtri e schede giocatore.</p>
+      <div class="upload"><input id="statsFile" type="file" accept=".csv,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><button id="statsBtn" class="btn-ghost btn-block">📊 Carica statistiche</button></div>
+      <div id="statsMsg" class="small muted" style="margin-top:8px"></div>
+    </section>
+
+    <section class="card">
       <h2>2. Carica rose</h2>
       <p class="small muted">Le squadre vengono ricavate automaticamente dal file e le rose sostituiscono quelle precedenti.</p>
       <div class="upload"><input id="rostersFile" type="file" accept=".csv,text/csv"><button id="rostersBtn" class="btn-ghost btn-block">Carica rose</button></div>
@@ -101,6 +108,7 @@ function renderManager(){const m=teams.find(t=>t.is_admin);$('managerCard').clas
 $('enterManagerBtn').onclick=async()=>{const team=$('enterManagerBtn').dataset.team;try{const r=await api('/api/admin/enter-manager',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({team})});const d=await r.json();if(!r.ok)throw new Error(detailText(d));localStorage.setItem('asta_token',d.token);localStorage.setItem('asta_team',d.team);localStorage.setItem('asta_manager','1');location.href='/auction'}catch(e){toast(e.message,true)}};
 async function upload(fileInput,path,msgEl){const f=$(fileInput).files[0];if(!f){$(msgEl).textContent='Seleziona un file CSV.';return}const fd=new FormData();fd.append('file',f);try{const r=await api(path,{method:'POST',body:fd});const d=await r.json();if(!r.ok){$(msgEl).textContent=detailText(d);return}$(msgEl).textContent='';toast('Caricamento completato');await refreshAll()}catch(e){$(msgEl).textContent=e.message}}
 $('catalogBtn').onclick=()=>upload('catalogFile','/api/admin/upload/catalog','catalogMsg');$('rostersBtn').onclick=()=>upload('rostersFile','/api/admin/upload/rosters','rostersMsg');
+$('statsBtn').onclick=async()=>{const f=$('statsFile').files[0];if(!f){$('statsMsg').textContent='Seleziona un file CSV o XLSX.';return}const fd=new FormData();fd.append('file',f);try{const r=await api('/api/admin/upload/statistics',{method:'POST',body:fd});const d=await r.json();if(!r.ok){$('statsMsg').textContent=detailText(d);return}$('statsMsg').textContent=`✅ ${d.matched} collegati · ${d.stats_without_catalog} nel file senza match · ${d.catalog_without_stats} del catalogo senza statistiche`;toast('Statistiche collegate al catalogo')}catch(e){$('statsMsg').textContent=e.message}};
 async function download(path,name){const r=await api(path);if(!r.ok)return;const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
 $('exportRoseBtn').onclick=()=>download('/api/admin/export/rose','rose_attuali.csv');$('exportCredsBtn').onclick=()=>download('/api/admin/export/residui','accessi_residui.csv');
 $('backupBtn').onclick=async()=>{const r=await api('/api/admin/backup',{method:'POST'});toast(r.ok?'Backup completo creato.':'Backup non riuscito.',!r.ok);loadBackups()};$('reloadBackupsBtn').onclick=loadBackups;

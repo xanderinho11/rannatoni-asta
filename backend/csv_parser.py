@@ -19,6 +19,10 @@ STAT_HEADER_ALIASES = {
     "ammonizioni": {"amm", "ammonizioni"},
     "espulsioni": {"esp", "espulsioni"},
     "rigori_segnati": {"rf", "rigori segnati", "rigori fatti"},
+    "pma": {"pma", "prezzo medio asta", "prezzo medio", "pma 12", "pma fantalab"},
+    "titolarita": {"titolarita", "titolarità", "% titolare", "percentuale titolare", "titolare"},
+    "gol_subiti": {"gs", "gol subiti", "reti subite"},
+    "rigori_parati": {"rp", "rigori parati"},
 }
 
 STAT_LABELS = {
@@ -32,6 +36,10 @@ STAT_LABELS = {
     "ammonizioni": "Ammonizioni",
     "espulsioni": "Espulsioni",
     "rigori_segnati": "Rigori segnati",
+    "pma": "PMA",
+    "titolarita": "Titolarità",
+    "gol_subiti": "Gol subiti",
+    "rigori_parati": "Rigori parati",
 }
 
 def _norm_header(value: str):
@@ -246,7 +254,8 @@ def parse_catalog_csv(text: str):
             continue
         id_seen.add(pid)
 
-        nome_completo = r[2].strip() or r[1].strip()
+        nome_breve = r[1].strip() or r[2].strip()
+        nome_completo = r[2].strip() or nome_breve
         ruolo_raw = r[4].strip()
         club = r[9].strip() if len(r) > 9 else ""
 
@@ -267,7 +276,8 @@ def parse_catalog_csv(text: str):
         roles = normalize_roles(ruolo_raw)
         result["players"].append({
             "pid": pid,
-            "name": nome_completo or f"ID {pid}",
+            "name": nome_breve or nome_completo or f"ID {pid}",
+            "full_name": nome_completo or nome_breve or f"ID {pid}",
             "roles": roles,
             "club": club,
             "img": image_url,
@@ -275,3 +285,84 @@ def parse_catalog_csv(text: str):
         })
     return result
 
+
+
+IDENTITY_HEADERS = {"id", "id giocatore", "id calciatore", "codice", "cod", "nome", "nome completo", "calciatore", "giocatore", "squadra", "team", "ruolo", "ruoli"}
+
+def _safe_stat_key(label: str):
+    import re, unicodedata
+    raw = unicodedata.normalize("NFKD", str(label or "")).encode("ascii", "ignore").decode("ascii").lower()
+    raw = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    return raw[:40] or "dato"
+
+def parse_stats_rows(rows: list[list[str]]):
+    """Importa un file statistiche separato collegandolo ai giocatori per ID.
+    Riconosce le metriche note e conserva anche colonne numeriche aggiuntive.
+    """
+    result = {"records": [], "errors": [], "labels": {}}
+    if not rows:
+        result["errors"].append("File statistiche vuoto.")
+        return result
+    # Cerca la riga intestazione nelle prime 12 righe.
+    header_idx = None
+    id_idx = None
+    for ri, row in enumerate(rows[:12]):
+        norm = [_norm_header(c) for c in row]
+        for alias in ("id", "id giocatore", "id calciatore", "codice", "cod"):
+            if alias in norm:
+                header_idx, id_idx = ri, norm.index(alias)
+                break
+        if header_idx is not None:
+            break
+    if header_idx is None:
+        result["errors"].append("Non trovo una colonna ID nel file statistiche.")
+        return result
+    header = list(rows[header_idx])
+    norm_header = [_norm_header(c) for c in header]
+    known = _stat_columns(header)
+    col_to_key = {}
+    for key, idx in known.items():
+        col_to_key[idx] = key
+        result["labels"][key] = STAT_LABELS.get(key, header[idx].strip() or key)
+    used = set(col_to_key.values())
+    # Colonne numeriche sconosciute: le importiamo dinamicamente.
+    for idx, label in enumerate(header):
+        if idx == id_idx or _norm_header(label) in IDENTITY_HEADERS or idx in col_to_key or not str(label).strip():
+            continue
+        vals = []
+        for row in rows[header_idx+1:header_idx+16]:
+            if idx < len(row):
+                v = _parse_stat_number(row[idx])
+                if v is not None:
+                    vals.append(v)
+        if not vals:
+            continue
+        key = _safe_stat_key(label)
+        base = key; n = 2
+        while key in used:
+            key = f"{base}_{n}"; n += 1
+        used.add(key); col_to_key[idx] = key; result["labels"][key] = str(label).strip()
+    seen = set()
+    for ri, row in enumerate(rows[header_idx+1:], start=header_idx+2):
+        if id_idx >= len(row) or not str(row[id_idx]).strip():
+            continue
+        try:
+            pid = int(float(str(row[id_idx]).strip().replace(',', '.')))
+        except ValueError:
+            continue
+        if pid in seen:
+            continue
+        seen.add(pid)
+        stats = {}
+        for idx, key in col_to_key.items():
+            if idx < len(row):
+                v = _parse_stat_number(row[idx])
+                if v is not None:
+                    stats[key] = v
+        result["records"].append({"pid": pid, "stats": stats})
+    if not result["records"]:
+        result["errors"].append("Nessuna riga statistica valida trovata.")
+    return result
+
+def parse_stats_csv(text: str):
+    return parse_stats_rows(_read_csv_rows(text))

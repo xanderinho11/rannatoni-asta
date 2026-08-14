@@ -67,3 +67,32 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 12px;backgr
 .free-player-row .free-metric{min-width:68px;text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:3px}.free-metric strong{font-size:20px;color:var(--accent3);font-variant-numeric:tabular-nums}.free-metric>span:not(.badge){font-size:9px;color:var(--muted);max-width:82px}.free-passed{margin-top:3px}.free-floor{font-size:10px;color:#f7cf79;margin-top:3px;font-weight:800}
 .finish-recap{border:1px solid var(--line);background:rgba(0,0,0,.12);border-radius:13px;padding:10px 12px;margin:10px 0}.finish-row{padding:7px 0;border-bottom:1px solid var(--line);font-size:13px;font-weight:800}.finish-row:last-child{border-bottom:0}
 @media(max-width:390px){.bottom-nav{padding-left:4px;padding-right:4px}.nav-btn{font-size:8px}.nav-btn .ico{font-size:17px}}
+
+/* v7 */
+:root{
+  --role-p:#e59d17;
+  --role-dc:#20a464;
+  --role-ddds:#32b878;
+  --role-b:#1da89c;
+  --role-mid:#2563eb;
+  --role-wt:#7c22ed;
+  --role-apc:#f11948;
+}
+/* Un'unica palette: badge giocatore e filtri ruolo usano le stesse variabili. */
+.role-P,.role-filter-P{background:var(--role-p)!important}
+.role-Dc,.role-filter-Dc{background:var(--role-dc)!important}
+.role-Dd,.role-Ds,.role-filter-Dd,.role-filter-Ds{background:var(--role-ddds)!important}
+.role-B,.role-filter-B{background:var(--role-b)!important}
+.role-E,.role-M,.role-C,.role-filter-E,.role-filter-M,.role-filter-C{background:var(--role-mid)!important}
+.role-W,.role-T,.role-filter-W,.role-filter-T{background:var(--role-wt)!important}
+.role-A,.role-Pc,.role-filter-A,.role-filter-Pc{background:var(--role-apc)!important}
+.role-filter-bar{padding:12px 20px 9px 7px!important;scroll-padding-inline:18px;-webkit-overflow-scrolling:touch;overscroll-behavior-inline:contain}
+.role-filter-bar::after{content:"";flex:0 0 8px;height:1px}
+.role-filter.all{margin-left:1px}
+.clickable-player{cursor:pointer;-webkit-tap-highlight-color:rgba(168,85,247,.13)}
+.clickable-player:active{opacity:.82}
+.search-player-rich{padding:8px 10px}.search-player-rich .avatar-wrap{width:44px;height:44px;flex-basis:44px}.search-player-rich .avatar,.search-player-rich .avatar-fallback{width:44px;height:44px}
+.all-pass-message{margin-top:10px;padding:12px 13px;border-radius:12px;background:rgba(168,85,247,.09);border:1px solid rgba(192,132,252,.18);font-weight:850;color:#e9ddfb;text-align:center}.history-all-pass{margin:8px 12px 0}
+.finish-recap{padding:14px 15px!important;margin:16px 0 18px!important}.finish-row{padding:11px 0!important;line-height:1.45}.finish-recap+.notice{margin-top:4px;margin-bottom:8px}.modal-title{margin-bottom:13px}.modal-actions{margin-top:20px}
+.player-detail-head{display:flex;align-items:center;gap:13px;margin:2px 0 16px}.player-detail-head .avatar-wrap{width:58px;height:58px;flex-basis:58px}.player-detail-head .avatar,.player-detail-head .avatar-fallback{width:58px;height:58px}.player-detail-name{font-size:20px;font-weight:950;line-height:1.15}.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px}.stat-card{padding:10px 11px;border-radius:12px;border:1px solid var(--line);background:rgba(0,0,0,.14);min-width:0}.stat-card span{display:block;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.stat-card strong{display:block;margin-top:3px;color:var(--accent3);font-size:18px;font-variant-numeric:tabular-nums}.player-detail-body .notice{margin-top:8px}
+@media(max-width:380px){.role-filter-bar{padding-right:24px!important}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
