@@ -157,3 +157,8 @@ La scheda calciatore è stata semplificata per l’uso rapido da telefono: mostr
 ## Novità v10
 
 Il partecipante entra automaticamente nel mercato al login e resta attivo fino a **Ho finito gli acquisti**, che conclude il mercato e disconnette la squadra. Durante gli svincoli necessari dopo una vittoria, la conferma resta fissa in basso mentre si scorre la rosa.
+
+
+## Novità v11
+
+Prima dell'avvio ufficiale la schermata Asta è una Lobby: mostra chi ha già effettuato il login e chi deve ancora accedere. Il Super Admin avvia esplicitamente la sessione con **▶️ Avvia asta**; prima di quel momento RANDOM e apertura manuale sono bloccati. Durante gli svincoli la lista non viene più ricostruita dagli aggiornamenti realtime, evitando i salti in cima. Nello Storico la card apre il dettaglio dell'asta, mentre foto e nome aprono le statistiche. La ricerca manuale del Gestore non apre più la scheda statistiche.

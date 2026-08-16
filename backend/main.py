@@ -252,6 +252,26 @@ def auto_random_enabled():
     return db.get_setting("auto_random", "0") == "1"
 
 
+def auction_started():
+    """Stato ufficiale dell'asta.
+
+    Per database creati prima della v11 inferisce "iniziata" solo se esiste gia'
+    almeno un'asta conclusa o una busta attualmente aperta, poi persiste il dato.
+    """
+    value = db.get_setting("auction_started", None)
+    if value is None:
+        progress = db.get_auction_progress()
+        inferred = auction.mode != "idle" or int(progress.get("auctioned", 0)) > 0
+        db.set_setting("auction_started", "1" if inferred else "0")
+        return inferred
+    return value == "1"
+
+
+def _ensure_auction_started():
+    if not auction_started() and not simulation_active():
+        raise HTTPException(400, "L'asta non e' ancora stata avviata dal Super Admin.")
+
+
 def auto_random_seconds():
     if not _auto_random_deadline:
         return None
@@ -271,6 +291,7 @@ def _teams_with_presence():
 def build_state(viewer_team: str | None = None):
     state = auction.snapshot(viewer_team)
     state["simulation"] = simulation_active()
+    state["auction_started"] = auction_started()
     state["auto_random"] = auto_random_enabled()
     state["auto_random_seconds"] = auto_random_seconds()
     state["teams"] = _teams_with_presence()
@@ -356,7 +377,34 @@ async def logout(session: dict = Depends(get_session)):
 # ========= SUPER ADMIN: PREPARAZIONE =========
 @app.get("/api/admin/stats")
 def admin_stats(_: dict = Depends(require_superadmin)):
-    return db.count_rows()
+    return {**db.count_rows(), "auction_started": auction_started()}
+
+
+@app.post("/api/admin/start-auction")
+async def admin_start_auction(_: dict = Depends(require_superadmin)):
+    if simulation_active():
+        raise HTTPException(400, "Termina la simulazione prima di avviare ufficialmente l'asta.")
+    if auction.mode != "idle":
+        raise HTTPException(400, "C'e' gia' una busta in corso.")
+    if auction_started():
+        return {"ok": True, "already_started": True}
+
+    counts = db.count_rows()
+    teams = db.get_all_teams(True)
+    if counts.get("players", 0) <= 0:
+        raise HTTPException(400, "Carica prima il Catalogo.")
+    if counts.get("roster", 0) <= 0 or not teams:
+        raise HTTPException(400, "Carica prima le Rose.")
+    if any(not t.get("username") or not t.get("pin_configured") for t in teams):
+        raise HTTPException(400, "Completa prima username e PIN di tutte le squadre.")
+    if sum(1 for t in teams if t.get("is_admin")) != 1:
+        raise HTTPException(400, "Configura esattamente un Gestore asta.")
+
+    db.set_setting("auction_started", "1")
+    backup_if_real("avvio ufficiale asta")
+    await broadcast_state()
+    entered = sum(1 for t in teams if t.get("ready") and not t.get("market_finished"))
+    return {"ok": True, "entered": entered, "total": len(teams)}
 
 
 @app.get("/api/admin/teams")
@@ -481,6 +529,10 @@ async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require
         db.replace_initial_rosters(list(parsed["teams"].keys()), parsed["assignments"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    _stop_timer()
+    _cancel_auto_random()
+    db.set_setting("auto_random", "0")
+    db.set_setting("auction_started", "0")
     auction.reset(persist=True)
     storage.salva("caricamento rose")
     await broadcast_state()
@@ -537,6 +589,7 @@ async def reset_all(body: ResetBody, _: dict = Depends(require_superadmin)):
     _stop_timer()
     _cancel_auto_random()
     db.set_setting("auto_random", "0")
+    db.set_setting("auction_started", "0")
     db.reset_all(bool(body.keep_catalog))
     auction.reset(persist=True)
     await broadcast_state()
@@ -744,6 +797,7 @@ async def set_ready(body: ReadyBody, session: dict = Depends(require_team)):
 @app.post("/api/market/finish")
 async def finish_market(session: dict = Depends(require_team)):
     _ensure_pin_changed(session)
+    _ensure_auction_started()
     if auction.mode != "idle":
         raise HTTPException(400, "Puoi concludere il mercato solo tra un'asta e la successiva.")
     summary = db.roster_summary(session["team"])
@@ -804,7 +858,7 @@ async def _arm_auto_random():
     """Avvia il conto alla rovescia se c'e' almeno un Rannatone entrato nel mercato."""
     global _auto_random_task, _auto_random_deadline
     _cancel_auto_random()
-    if not auto_random_enabled() or auction.mode != "idle":
+    if (not auction_started() and not simulation_active()) or not auto_random_enabled() or auction.mode != "idle":
         return False
     ready = db.ready_market_teams()
     if not ready:
@@ -903,6 +957,7 @@ class RandomBody(BaseModel):
 
 @app.post("/api/auction/admin/random")
 async def open_random(body: RandomBody, _: dict = Depends(require_auction_manager)):
+    _ensure_auction_started()
     _cancel_auto_random()
     async with AUCTION_LOCK:
         try:
@@ -922,6 +977,7 @@ class OpenPlayerBody(BaseModel):
 
 @app.post("/api/auction/admin/open")
 async def open_manual(body: OpenPlayerBody, _: dict = Depends(require_auction_manager)):
+    _ensure_auction_started()
     _cancel_auto_random()
     async with AUCTION_LOCK:
         try:
@@ -1071,6 +1127,7 @@ class AutoRandomBody(BaseModel):
 
 @app.post("/api/auction/admin/auto-random")
 async def set_auto_random(body: AutoRandomBody, _: dict = Depends(require_auction_manager)):
+    _ensure_auction_started()
     db.set_setting("auto_random", "1" if body.enabled else "0")
     if body.enabled:
         await _arm_auto_random()
