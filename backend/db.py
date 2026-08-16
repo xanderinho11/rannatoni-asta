@@ -809,21 +809,24 @@ def get_free_agents(viewer_team: str | None = None):
         if viewer_team:
             p["my_release_floor"] = int(floors.get(int(p["pid"]), 0))
         players.append(p)
+    # Durante l'asta mostriamo solo gli indicatori davvero utili: le altre
+    # statistiche possono restare salvate nel DB, ma non affollano menu e schede.
     stat_keys = []
-    preferred = ["quotazione", "fvm", "fantamedia", "media_voto", "presenze", "gol", "assist", "ammonizioni", "espulsioni", "rigori_segnati"]
+    preferred = ["quotazione", "pma", "media_voto", "fantamedia", "presenze", "gol", "assist"]
     labels = {
-        "quotazione":"Quotazione", "fvm":"FVM", "fantamedia":"FantaMedia",
-        "media_voto":"Media voto", "presenze":"Presenze", "gol":"Gol",
-        "assist":"Assist", "ammonizioni":"Ammonizioni", "espulsioni":"Espulsioni",
-        "rigori_segnati":"Rigori segnati", "pma":"PMA", "titolarita":"Titolarità",
-        "gol_subiti":"Gol subiti", "rigori_parati":"Rigori parati",
+        "quotazione": "Quotazione",
+        "pma": "PMA",
+        "media_voto": "Media voto",
+        "fantamedia": "FMV",
+        "presenze": "Presenze",
+        "gol": "Gol",
+        "assist": "Assist",
     }
-    labels.update(get_stats_labels())
     present = {k for p in players for k in (p.get("stats") or {})}
-    for key in preferred + [k for k in labels if k not in preferred]:
-        if key in present and not any(x["key"] == key for x in stat_keys):
-            stat_keys.append({"key": key, "label": labels.get(key,key.replace('_',' ').title()), "numeric": True})
-    stat_keys.append({"key":"name", "label":"Nome", "numeric":False})
+    for key in preferred:
+        if key in present:
+            stat_keys.append({"key": key, "label": labels[key], "numeric": True})
+    stat_keys.append({"key": "name", "label": "Nome", "numeric": False})
     return {"players": players, "sort_fields": stat_keys}
 
 

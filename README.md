@@ -78,7 +78,7 @@ Le rose sono ordinate usando sempre il **primo ruolo del catalogo**:
 
 **POR → DC → DD → DS → B → E → M → C → W → T → A → PC**
 
-I multiruolo mantengono fino a 3 badge visibili. `E` usa lo stesso azzurro di `M/C`; `W` lo stesso colore di `T`; `PC` lo stesso colore di `A`.
+I multiruolo mantengono fino a 3 badge visibili. `DC`, `DD`, `DS` e `B` usano lo stesso identico verde; `E` usa lo stesso azzurro di `M/C`; `W` lo stesso colore di `T`; `PC` lo stesso colore di `A`.
 
 ## Spettatore
 
@@ -92,7 +92,7 @@ La modalità 👀 Spettatore non partecipa all'asta e non viene conteggiata nei 
 
 ## Svincolati e riacquisto
 
-La sezione **Svincolati** mostra tutti i giocatori liberi. Un multiruolo compare in ogni filtro ruolo che possiede (es. `DS/DD/E` compare in DS, DD ed E). La ricerca per nome e l’ordinamento possono usare Quotazione, FantaMedia, Media voto, Gol, Assist e gli altri dati riconosciuti nel Catalogo.
+La sezione **Svincolati** mostra tutti i giocatori liberi. Un multiruolo compare in ogni filtro ruolo che possiede (es. `DS/DD/E` compare in DS, DD ed E). La ricerca per nome resta completa; gli ordinamenti mostrati durante l’asta sono limitati a Quotazione, PMA, Media voto, FMV, Presenze, Gol e Assist.
 
 Se una squadra svincola un calciatore a `X`, può riacquistarlo ma la sua offerta minima personale è `X`. Se vince con le altre offerte più basse, il prezzo finale resta comunque almeno `X`.
 
@@ -147,3 +147,8 @@ Non serve configurare manualmente le chiavi. Facoltativamente si può impostare 
 ## Statistiche opzionali (v8)
 
 Il file statistiche non è necessario per avviare l’asta. Catalogo e Rose sono indipendenti dalle statistiche. Sono supportati CSV/XLSX con ID e i file Strategia/FantaLab senza ID: in questo secondo caso il collegamento avviene tramite nome breve + squadra. I giocatori senza match rimangono normalmente astabili e visibili, semplicemente senza dati statistici.
+
+
+## Novità v9
+
+La scheda calciatore è stata semplificata per l’uso rapido da telefono: mostra Media voto, FMV, Quotazione, PMA e Presenze, con Gol/Assist in formato secondario quando disponibili. Gli altri dati del file Strategia restano importati ma non affollano l’interfaccia. I ruoli difensivi `DC`, `DD`, `DS` e `B` condividono ora esattamente lo stesso verde.
