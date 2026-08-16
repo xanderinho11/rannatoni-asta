@@ -88,8 +88,9 @@ class Auction:
 
     # ---------- apertura ----------
     def active_teams(self) -> set[str]:
-        # Ogni busta fotografa i Rannatoni che risultano Pronti nel momento
-        # dell'estrazione. Chi diventa pronto dopo partecipa dalla successiva.
+        # v10: "ready" e' uno stato interno che significa "entrato nel mercato".
+        # Viene attivato automaticamente al login e resta tale anche se il telefono
+        # va offline/background. Si spegne solo con "Ho finito gli acquisti".
         return {t["name"] for t in db.ready_market_teams()}
 
     def open_player(self, pid: int):
@@ -102,7 +103,7 @@ class Auction:
             raise AuctionError(f"Giocatore gia' assegnato a {owner}.")
         attive = self.active_teams()
         if len(attive) < 1:
-            raise AuctionError("Nessun Rannatone pronto: serve almeno un partecipante per avviare l'asta.")
+            raise AuctionError("Nessun Rannatone e' ancora entrato nel mercato: serve almeno un partecipante per avviare l'asta.")
 
         self.mode = "bidding"
         self.current_pid = int(pid)

@@ -390,6 +390,7 @@ def active_market_teams():
 
 
 def ready_market_teams():
+    """Rannatoni entrati nel mercato almeno una volta tramite login (v10+)."""
     return [t for t in active_market_teams() if t.get("ready")]
 
 

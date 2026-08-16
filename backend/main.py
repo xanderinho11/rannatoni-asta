@@ -157,6 +157,12 @@ class ConnectionManager:
             "last_seen": time.time(),
         }
         if team:
+            # v10: il login/una sessione attiva equivale a essere entrati nel mercato.
+            # Non si torna "non pronti" chiudendo l'app o andando offline: si esce
+            # solo con "Ho finito gli acquisti".
+            current_team = db.get_team(team)
+            if current_team and not current_team.get("market_finished") and not current_team.get("ready"):
+                db.set_ready(team, True)
             self.last_presence[team] = {"visibility": "visible", "last_seen": time.time()}
 
     def touch(self, ws: WebSocket, visibility: str):
@@ -310,6 +316,10 @@ async def login(body: LoginBody):
     team = db.get_team_by_credentials(body.username.strip(), body.pin.strip())
     if not team:
         raise HTTPException(401, "Username o PIN errati.")
+    # v10: il primo login mette automaticamente il Rannatone "in asta".
+    # Chi ha gia' concluso il mercato puo' comunque accedere in sola consultazione.
+    if not team.get("market_finished"):
+        db.set_ready(team["name"], True)
     token = _new_session("team", team["name"])
     return {
         "token": token,
@@ -333,8 +343,8 @@ def spectator_login():
 
 @app.post("/api/logout")
 async def logout(session: dict = Depends(get_session)):
-    if session.get("role") == "team" and session.get("team"):
-        db.set_ready(session["team"], False)
+    # Uscire dalla sessione non rimuove piu' un partecipante dal mercato.
+    # L'unico evento che lo esclude dalle aste e' la conclusione del mercato.
     SESSIONS.pop(session["token"], None)
     _save_sessions()
     await broadcast_state()
@@ -716,14 +726,19 @@ class ReadyBody(BaseModel):
 
 @app.post("/api/ready")
 async def set_ready(body: ReadyBody, session: dict = Depends(require_team)):
+    """Compatibilita' con client precedenti alla v10.
+
+    Da v10 non esiste piu' il toggle Pronto: un Rannatone che ha effettuato
+    il login resta in asta fino a quando conclude il mercato.
+    """
     team = _ensure_pin_changed(session)
-    if body.ready and team and team.get("market_finished"):
+    if team and team.get("market_finished"):
         raise HTTPException(400, "Hai gia' concluso il mercato.")
-    db.set_ready(session["team"], bool(body.ready))
+    db.set_ready(session["team"], True)
     await broadcast_state()
     if auction.mode == "idle" and auto_random_enabled():
         await _arm_auto_random()
-    return {"ok": True, "ready": bool(body.ready)}
+    return {"ok": True, "ready": True}
 
 
 @app.post("/api/market/finish")
@@ -741,9 +756,12 @@ async def finish_market(session: dict = Depends(require_team)):
         db.set_market_finished(session["team"], True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # "Ho finito gli acquisti" e disconnessione sono un'unica operazione:
+    # invalida tutte le sessioni della squadra. Il client pulisce poi il token locale.
+    _invalidate_team_sessions(session["team"])
     await broadcast_state()
     await _arm_auto_random()
-    return {"ok": True, "market_finished": True, "roster_rules": summary}
+    return {"ok": True, "market_finished": True, "logged_out": True, "roster_rules": summary}
 
 
 # ========= TIMER / ASTA =========
@@ -783,7 +801,7 @@ def _cancel_auto_random():
 
 
 async def _arm_auto_random():
-    """Avvia il conto alla rovescia solo se l'asta e' davvero pronta a proseguire."""
+    """Avvia il conto alla rovescia se c'e' almeno un Rannatone entrato nel mercato."""
     global _auto_random_task, _auto_random_deadline
     _cancel_auto_random()
     if not auto_random_enabled() or auction.mode != "idle":
@@ -800,8 +818,8 @@ async def _arm_auto_random():
             while _auto_random_deadline and time.time() < _auto_random_deadline:
                 await asyncio.sleep(0.25)
             async with AUCTION_LOCK:
-                # Ricontrolla tutto allo zero: qualcuno potrebbe essersi disconnesso,
-                # aver concluso il mercato o l'admin potrebbe aver aperto manualmente.
+                # Ricontrolla tutto allo zero: qualcuno potrebbe aver concluso
+                # il mercato o l'admin potrebbe aver aperto manualmente.
                 if not auto_random_enabled() or auction.mode != "idle":
                     return
                 ready_now = db.ready_market_teams()
@@ -1077,20 +1095,30 @@ class ReactivateTeamBody(BaseModel):
 async def reactivate_team(body: ReactivateTeamBody, _: dict = Depends(require_auction_manager)):
     if auction.mode != "idle":
         raise HTTPException(400, "Riattiva una squadra tra un'asta e la successiva.")
+    team_name = body.team.strip()
     try:
-        db.set_market_finished(body.team.strip(), False)
+        db.set_market_finished(team_name, False)
+        # Se il Rannatone e' gia' autenticato in sola consultazione, la riattivazione
+        # lo rimette subito in asta. Altrimenti entrera' automaticamente al login.
+        has_live_session = any(
+            sess.get("role") == "team" and sess.get("team") == team_name
+            and float(sess.get("expires_at", 0)) > time.time()
+            for sess in SESSIONS.values()
+        )
+        if has_live_session:
+            db.set_ready(team_name, True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     await broadcast_state()
+    if auction.mode == "idle" and auto_random_enabled():
+        await _arm_auto_random()
     return {"ok": True}
 
 
 @app.post("/api/auction/admin/reset-ready")
 async def reset_ready(_: dict = Depends(require_auction_manager)):
-    _cancel_auto_random()
-    db.reset_ready()
-    await broadcast_state()
-    return {"ok": True}
+    # Endpoint legacy: da v10 lo stato "Pronto" non e' piu' modificabile manualmente.
+    raise HTTPException(410, "Da v10 i Rannatoni entrano automaticamente nel mercato al login.")
 
 
 @app.get("/api/auction/admin/passed")
