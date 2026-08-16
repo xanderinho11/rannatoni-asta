@@ -152,3 +152,8 @@ Il file statistiche non è necessario per avviare l’asta. Catalogo e Rose sono
 ## Novità v9
 
 La scheda calciatore è stata semplificata per l’uso rapido da telefono: mostra Media voto, FMV, Quotazione, PMA e Presenze, con Gol/Assist in formato secondario quando disponibili. Gli altri dati del file Strategia restano importati ma non affollano l’interfaccia. I ruoli difensivi `DC`, `DD`, `DS` e `B` condividono ora esattamente lo stesso verde.
+
+
+## Novità v10
+
+Il partecipante entra automaticamente nel mercato al login e resta attivo fino a **Ho finito gli acquisti**, che conclude il mercato e disconnette la squadra. Durante gli svincoli necessari dopo una vittoria, la conferma resta fissa in basso mentre si scorre la rosa.
