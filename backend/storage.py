@@ -84,6 +84,28 @@ def elenco_backup():
     return out
 
 
+
+
+def pulisci_salvataggi():
+    """Rimuove tutti i backup e i CSV correnti senza toccare DB o chiavi dell'app."""
+    for path in glob.glob(os.path.join(BACKUP_DIR, "*")):
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.remove(path)
+        except FileNotFoundError:
+            pass
+    for path in (ROSE_FILE, RESIDUI_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+    try:
+        os.rmdir(BACKUP_DIR)
+    except OSError:
+        pass
+    return True
+
+
 def ripristina(tag: str):
     path = os.path.join(BACKUP_DIR, f"asta_{tag}.db")
     if not os.path.exists(path):

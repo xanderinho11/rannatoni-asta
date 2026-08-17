@@ -599,16 +599,30 @@ class ResetBody(BaseModel):
 
 
 @app.post("/api/admin/reset")
-async def reset_all(body: ResetBody, _: dict = Depends(require_superadmin)):
+async def reset_all(body: ResetBody, session: dict = Depends(require_superadmin)):
     global _timer_task
     _stop_timer()
     _cancel_auto_random()
-    db.set_setting("auto_random", "0")
-    db.set_setting("auction_started", "0")
-    db.reset_all(bool(body.keep_catalog))
-    auction.reset(persist=True)
+    keep_catalog = bool(body.keep_catalog)
+    db.reset_all(keep_catalog)
+    auction.reset(persist=False)
+
+    # Il reset totale e' una tabula rasa anche per salvataggi e sessioni utente.
+    # Manteniamo soltanto la sessione Super Admin che ha eseguito il reset.
+    if not keep_catalog:
+        storage.pulisci_salvataggi()
+        try:
+            os.remove(SIMULATION_PATH)
+        except FileNotFoundError:
+            pass
+        for tok in list(SESSIONS):
+            if tok != session.get("token"):
+                SESSIONS.pop(tok, None)
+        _save_sessions()
+        manager.last_presence.clear()
+
     await broadcast_state()
-    return {"ok": True, **db.count_rows()}
+    return {"ok": True, **db.count_rows(), "backups": len(storage.elenco_backup())}
 
 
 # ========= BACKUP / EXPORT =========
@@ -868,6 +882,12 @@ async def _push_new_auction():
     player = db.get_player(auction.current_pid) if auction.current_pid is not None else None
     if not player or not auction.eligible_teams:
         return
+
+    # v13: unico messaggio automatico della chat.
+    system_message = db.add_system_chat_message(f"🎲 È iniziata l’asta per {player['name']}")
+    if system_message:
+        await manager.broadcast_team_event("chat_message", system_message)
+
     await push_service.send_to_teams(
         auction.eligible_teams,
         title="🎲 Nuova asta Rannatoni",

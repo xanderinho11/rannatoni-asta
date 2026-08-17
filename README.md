@@ -1,164 +1,110 @@
-# Rannatoni v7 — locale + Railway
+# Rannatoni v13
 
-Web-app/PWA per l'asta di riparazione della lega **Rannatoni**. La v7 gira in locale e contiene già la configurazione per il deploy Railway.
+Web-app/PWA per l'**asta di riparazione** della lega Rannatoni, con FastAPI, WebSocket e SQLite.
 
-## Avvio locale su Windows
+## Avvio locale
 
-1. Apri `backend`.
-2. Avvia `avvia.bat`.
-3. Sul PC apri `http://localhost:8000`.
-4. Sui telefoni collegati alla stessa Wi‑Fi usa l'indirizzo `http://192.168.x.x:8000` mostrato nella finestra.
+1. Apri la cartella `backend`.
+2. Su Windows avvia `avvia.bat`; su Linux/macOS usa `avvia.sh`.
+3. Apri `http://localhost:8000`.
+4. Super Admin: `http://localhost:8000/admin`.
 
-Super Admin locale: `http://localhost:8000/admin`  
-Password locale predefinita: **`asta2026`**.
+In locale la password Super Admin predefinita è `asta2026`. Su Railway va impostata con `ADMIN_PASSWORD`.
 
-## Preparazione
+## Preparazione asta
 
 1. Carica **Catalogo**.
-2. Facoltativo: carica **Statistiche** FantaLab (CSV/XLSX), collegate per ID.
+2. Facoltativo: carica **Statistiche** FantaLab/Strategia (CSV/XLSX).
 3. Carica **Rose**.
-4. Configura username, residui e gestore.
-5. Per gli account nuovi genera un **PIN temporaneo**.
-6. Salva e distribuisci username + PIN temporaneo.
-7. Premi **Entra nell'asta come gestore**.
+4. Inserisci gli **username** delle squadre.
+5. Premi **Genera PIN per tutti**: vengono creati PIN temporanei casuali di 4 cifre.
+6. Imposta residui e seleziona la squadra che **gestisce l'asta**.
+7. Salva la configurazione e distribuisci username + PIN temporaneo.
+8. Il Super Admin preme **Avvia asta**.
 
-### Privacy PIN
+Al primo login ogni Rannatone deve cambiare il PIN temporaneo con un PIN personale. Il Super Admin non può vedere il PIN personale; può solo resettarlo generando un nuovo PIN temporaneo.
 
-- Il PIN attuale **non è mai visibile al Super Admin**.
-- I PIN sono salvati nel DB come hash PBKDF2, non in chiaro.
-- Il Super Admin può solo fare **Reset PIN**, ricevendo un nuovo PIN temporaneo mostrato una sola volta.
-- Al primo accesso il Rannatone deve obbligatoriamente scegliere il proprio PIN personale.
-- Il PIN personale può essere cambiato in seguito dal Profilo.
-- Cambio/reset PIN invalida le altre sessioni della squadra.
+## Partecipazione
 
-## Asta veloce
+- Il login equivale automaticamente a essere **in asta**.
+- Non esiste più il pulsante “Sono pronto”.
+- Chi chiude l'app o va offline resta comunque nel mercato.
+- Si esce dal mercato solo con **Ho finito gli acquisti**, che conclude il mercato e disconnette l'utente.
+- Solo Gestore/Super Admin può riattivare un Rannatone che ha concluso.
 
-- Timer standard: **60 secondi**.
-- Quando parte una busta, partecipano **solo i Rannatoni che risultano Pronti in quell'istante**.
-- L'elenco viene congelato per quella busta: chi diventa Pronto dopo entrerà dalla successiva.
-- Appena tutti i partecipanti di quella busta hanno risposto, le buste si **aprono automaticamente**.
-- Se qualcuno è bloccato, il gestore può premere **Apri buste ora**: chi manca viene considerato PASSO.
-- Se scadono i 60 secondi, apertura automatica e mancanti = PASSO.
-- Il gestore, se partecipa alla busta, deve aver già inviato la propria risposta prima di forzare l'apertura.
-- La stessa logica vale negli spareggi.
-- Le offerte possono essere modificate fino all'apertura della busta.
+Prima dell'avvio ufficiale viene mostrata la **Lobby** con chi ha già effettuato l'accesso e chi deve ancora entrare.
 
-## Spareggio e vittoria casuale
+## Asta
 
-Se uno spareggio resta in parità senza rilanci, l'assegnazione casuale viene mostrata chiaramente come:
+- Timer standard: 60 secondi.
+- Le buste sono segrete fino all'apertura.
+- Quando tutti gli aventi diritto hanno risposto, l'apertura è automatica.
+- Il Gestore può forzare l'apertura; i mancanti vengono considerati PASSO.
+- Le offerte possono essere modificate fino all'apertura.
+- Il valore digitato nel campo offerta resta preservato durante gli aggiornamenti realtime.
+- RANDOM automatico: dopo un'asta conclusa può partire la successiva dopo 10 secondi.
 
-**🎲 VITTORIA CASUALE**
+## Svincoli
 
-La stessa indicazione resta anche nello Storico.
-
-## RANDOM automatico
-
-Con **RANDOM automatico** attivo, dopo la chiusura completa dell'asta parte un countdown di 10 secondi. È sufficiente che ci sia **almeno un Rannatone Pronto**: la nuova busta coinvolge solo chi è Pronto in quel momento.
-
-Il gestore può fermare la singola estrazione automatica dal countdown.
+- Barra di conferma sticky sempre visibile durante la scelta degli svincoli.
+- Posizione di scroll e selezioni restano preservate durante gli aggiornamenti realtime.
+- Un giocatore **acquistato nella sessione d'asta corrente non può essere svincolato nella stessa sessione**, con controllo sia UI sia backend.
+- Se una squadra riacquista un giocatore che aveva svincolato, la sua offerta minima personale è almeno il prezzo di svincolo.
 
 ## Rose
 
-Nel menu inferiore sono disponibili:
+Ordine visuale basato sul primo ruolo del catalogo:
 
-- **La mia rosa** — rosa personale;
-- **Rose** — tutte le squadre della lega;
-- **Svincolati** — tutti i calciatori liberi con ricerca, filtri ruolo e ordinamento per statistiche disponibili;
-- **Storico**;
-- **Lobby**.
+`POR → DC → DD → DS → B → E → M → C → W → T → A → PC`
 
-La sezione **Rose** mostra per ogni squadra:
+I giocatori mostrano foto, squadra reale e fino a tre badge ruolo.
 
-- giocatori occupati / 35;
-- posti liberi;
-- crediti residui;
-- rosa completa toccando la squadra.
+## Svincolati e statistiche
 
-Le rose sono ordinate usando sempre il **primo ruolo del catalogo**:
+La ricerca Svincolati combina nome, filtro ruolo e ordinamento. I soli ordinamenti disponibili sono:
 
-**POR → DC → DD → DS → B → E → M → C → W → T → A → PC**
+- Nome
+- Media voto
+- Fantamedia
+- Quotazione
 
-I multiruolo mantengono fino a 3 badge visibili. `DC`, `DD`, `DS` e `B` usano lo stesso identico verde; `E` usa lo stesso azzurro di `M/C`; `W` lo stesso colore di `T`; `PC` lo stesso colore di `A`.
+I popup del calciatore mostrano foto, ruoli, nome, squadra e solo:
 
-## Spettatore
+- Media voto
+- Fantamedia
+- Quotazione
 
-La modalità 👀 Spettatore non partecipa all'asta e non viene conteggiata nei Pronti. Può vedere:
+Le altre statistiche possono restare importate nel database, ma non vengono mostrate nell'interfaccia operativa.
 
-- asta live e timer;
-- offerte solo dopo l'apertura;
-- risultati e svincolati;
-- tutte le Rose con posti e residui;
-- Storico.
+## Chat Rannatoni
 
-## Svincolati e riacquisto
+- Chat generale realtime salvata in SQLite.
+- Nome squadra + badge `👑 Gestore` per chi gestisce l'asta.
+- Il Gestore può eliminare messaggi degli utenti.
+- Su telefono la chat si apre come pannello.
+- Su desktop largo la chat resta visibile sulla destra mentre si segue l'asta.
+- All'inizio di ogni busta compare solo il messaggio automatico: `🎲 È iniziata l’asta per NomeGiocatore`.
 
-La sezione **Svincolati** mostra tutti i giocatori liberi. Un multiruolo compare in ogni filtro ruolo che possiede (es. `DS/DD/E` compare in DS, DD ed E). La ricerca per nome resta completa; gli ordinamenti mostrati durante l’asta sono limitati a Quotazione, PMA, Media voto, FMV, Presenze, Gol e Assist.
+## Storico
 
-Se una squadra svincola un calciatore a `X`, può riacquistarlo ma la sua offerta minima personale è `X`. Se vince con le altre offerte più basse, il prezzo finale resta comunque almeno `X`.
+- Tap su foto/nome del giocatore: scheda statistiche.
+- Tap sulla card/risultato: dettaglio asta con offerte e svincoli.
+- Vittorie casuali indicate chiaramente con `🎲 VITTORIA CASUALE`.
 
-## Vincoli rosa e fine mercato
+## Backup e reset
 
-- minimo **2 POR**, massimo **5 POR**;
-- minimo **21 giocatori di movimento**;
-- massimo **35 giocatori totali**.
+I backup completi includono database e CSV correnti. Il **Resetta completamente Rannatoni** del Super Admin cancella:
 
-**🏁 Ho finito gli acquisti** mostra un riepilogo della rosa e può essere confermato solo se i requisiti sono rispettati. Dopo la conferma il Rannatone non può rientrare autonomamente: può farlo solo il gestore con **Riattiva Rannatone**. **Disconnetti** invalida realmente la sessione.
+- Catalogo e statistiche
+- Rose, squadre, username e PIN
+- Storico aste, offerte e svincoli
+- Chat
+- Stato della sessione
+- Sessioni utenti
+- Tutti i backup e i CSV correnti
 
-## Affidabilità
-
-- stato live, offerte e spareggi persistiti in SQLite;
-- acquisto + svincoli transazionali;
-- backup SQLite completi;
-- CSV rose aggiornati dopo le operazioni definitive;
-- un solo proprietario per giocatore;
-- import atomici e foreign key attive;
-- sessioni persistenti con scadenza;
-- modalità Simulazione con ripristino dello stato reale.
+La password `ADMIN_PASSWORD`, il codice dell'app e il volume Railway non vengono rimossi.
 
 ## Railway
 
-Leggi `DOMANI_RAILWAY.md`. Il progetto include già `Dockerfile` e `railway.toml`.
-
-Online devi impostare:
-
-- `ADMIN_PASSWORD` forte;
-- Volume persistente montato su `/app/data`.
-
-La build online si rifiuta di partire con la password locale `asta2026`.
-
-## v5 - notifiche push
-
-La v5 aggiunge Web Push reali per i Rannatoni partecipanti. Le chiavi VAPID vengono generate automaticamente al primo avvio e salvate nella cartella `data/`, quindi su Railway restano persistenti nel volume montato su `/app/data`.
-
-Non serve configurare manualmente le chiavi. Facoltativamente si può impostare la variabile `VAPID_SUBJECT` con un contatto `mailto:` o URL.
-
-
-## Novità v7
-
-- Il nome mostrato dei calciatori usa la colonna breve/cognome del Catalogo; il nome completo resta ricercabile e visibile nella scheda.
-- Upload separato **Statistiche giocatori** CSV/XLSX con merge tramite ID e riepilogo dei match.
-- Svincolati ordinabili per le statistiche disponibili; chi non ha il dato resta sempre in fondo.
-- Toccando un calciatore da Asta, Rose, Svincolati, Storico o ricerca manuale si apre la scheda statistiche senza uscire dalla schermata.
-- Ricerca manuale con foto, badge ruolo e squadra.
-- Risultato PASSATO semplificato: “Tutti i Rannatoni hanno passato”, senza tendina offerte.
-- Barra filtri ruolo mobile con posizione conservata/centrata e padding finale per non tagliare PC/Tutti.
-- Palette badge ruolo unificata in tutta l’app.
-
-## Statistiche opzionali (v8)
-
-Il file statistiche non è necessario per avviare l’asta. Catalogo e Rose sono indipendenti dalle statistiche. Sono supportati CSV/XLSX con ID e i file Strategia/FantaLab senza ID: in questo secondo caso il collegamento avviene tramite nome breve + squadra. I giocatori senza match rimangono normalmente astabili e visibili, semplicemente senza dati statistici.
-
-
-## Novità v9
-
-La scheda calciatore è stata semplificata per l’uso rapido da telefono: mostra Media voto, FMV, Quotazione, PMA e Presenze, con Gol/Assist in formato secondario quando disponibili. Gli altri dati del file Strategia restano importati ma non affollano l’interfaccia. I ruoli difensivi `DC`, `DD`, `DS` e `B` condividono ora esattamente lo stesso verde.
-
-
-## Novità v10
-
-Il partecipante entra automaticamente nel mercato al login e resta attivo fino a **Ho finito gli acquisti**, che conclude il mercato e disconnette la squadra. Durante gli svincoli necessari dopo una vittoria, la conferma resta fissa in basso mentre si scorre la rosa.
-
-
-## Novità v11
-
-Prima dell'avvio ufficiale la schermata Asta è una Lobby: mostra chi ha già effettuato il login e chi deve ancora accedere. Il Super Admin avvia esplicitamente la sessione con **▶️ Avvia asta**; prima di quel momento RANDOM e apertura manuale sono bloccati. Durante gli svincoli la lista non viene più ricostruita dagli aggiornamenti realtime, evitando i salti in cima. Nello Storico la card apre il dettaglio dell'asta, mentre foto e nome aprono le statistiche. La ricerca manuale del Gestore non apre più la scheda statistiche.
+Il progetto include `Dockerfile` e `railway.toml`. In produzione il volume persistente resta montato su `/app/data` e la porta pubblica usata dal progetto è 8080.

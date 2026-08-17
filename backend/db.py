@@ -128,6 +128,7 @@ def init_db():
                 ts TEXT NOT NULL,
                 team TEXT NOT NULL,
                 body TEXT NOT NULL,
+                system INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (team) REFERENCES teams(name) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_id ON chat_messages(id);
@@ -159,6 +160,10 @@ def init_db():
         if "full_name" not in player_cols:
             conn.execute("ALTER TABLE players ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
             conn.execute("UPDATE players SET full_name=name WHERE full_name='' OR full_name IS NULL")
+
+        chat_cols = _table_columns(conn, "chat_messages")
+        if "system" not in chat_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN system INTEGER NOT NULL DEFAULT 0")
 
         # Il vecchio schema non aveva UNIQUE(pid). Prima di creare l'indice segnaliamo
         # eventuali dati corrotti invece di scegliere arbitrariamente un proprietario.
@@ -415,8 +420,12 @@ def reset_all(keep_catalog: bool = False):
         conn.execute("DELETE FROM auction_events")
         conn.execute("DELETE FROM passed_players")
         conn.execute("DELETE FROM chat_messages")
+        conn.execute("DELETE FROM push_subscriptions")
         conn.execute("DELETE FROM roster")
         conn.execute("DELETE FROM teams")
+        # Le impostazioni sono tutte legate alla configurazione/sessione dell'asta:
+        # avvio, auto-random, statistiche, simulazione e riferimenti di sessione.
+        conn.execute("DELETE FROM settings")
         if not keep_catalog:
             conn.execute("DELETE FROM players")
         conn.commit()
@@ -867,24 +876,19 @@ def get_free_agents(viewer_team: str | None = None):
         if viewer_team:
             p["my_release_floor"] = int(floors.get(int(p["pid"]), 0))
         players.append(p)
-    # Durante l'asta mostriamo solo gli indicatori davvero utili: le altre
-    # statistiche possono restare salvate nel DB, ma non affollano menu e schede.
-    stat_keys = []
-    preferred = ["quotazione", "pma", "media_voto", "fantamedia", "presenze", "gol", "assist"]
+    # v13: nella schermata Svincolati manteniamo solo i quattro criteri
+    # concordati: Nome, Media voto, Fantamedia e Quotazione.
+    stat_keys = [{"key": "name", "label": "Nome", "numeric": False}]
+    preferred = ["media_voto", "fantamedia", "quotazione"]
     labels = {
-        "quotazione": "Quotazione",
-        "pma": "PMA",
         "media_voto": "Media voto",
-        "fantamedia": "FMV",
-        "presenze": "Presenze",
-        "gol": "Gol",
-        "assist": "Assist",
+        "fantamedia": "Fantamedia",
+        "quotazione": "Quotazione",
     }
     present = {k for p in players for k in (p.get("stats") or {})}
     for key in preferred:
         if key in present:
             stat_keys.append({"key": key, "label": labels[key], "numeric": True})
-    stat_keys.append({"key": "name", "label": "Nome", "numeric": False})
     return {"players": players, "sort_fields": stat_keys}
 
 
@@ -1108,6 +1112,13 @@ def push_subscriptions_for_teams(teams: list[str] | set[str]):
 
 
 # ---------- CHAT ----------
+def _chat_row_to_dict(row):
+    d = dict(row)
+    d["is_manager"] = bool(d.pop("is_admin", 0))
+    d["system"] = bool(d.get("system", 0))
+    return d
+
+
 def add_chat_message(team: str, body: str):
     clean = " ".join(str(body or "").replace("\r", " ").replace("\n", " ").split()).strip()
     if not clean:
@@ -1118,16 +1129,38 @@ def add_chat_message(team: str, body: str):
     with get_conn() as conn:
         if not conn.execute("SELECT 1 FROM teams WHERE name=?", (team,)).fetchone():
             raise ValueError("Squadra non trovata.")
-        cur = conn.execute("INSERT INTO chat_messages(ts,team,body) VALUES (?,?,?)", (now, team, clean))
+        cur = conn.execute("INSERT INTO chat_messages(ts,team,body,system) VALUES (?,?,?,0)", (now, team, clean))
         mid = int(cur.lastrowid)
         row = conn.execute(
-            "SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id=?",
+            "SELECT c.id,c.ts,c.team,c.body,c.system,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id=?",
             (mid,),
         ).fetchone()
         conn.commit()
-        d = dict(row)
-        d["is_manager"] = bool(d.pop("is_admin", 0))
-        return d
+        return _chat_row_to_dict(row)
+
+
+def add_system_chat_message(body: str):
+    """Salva un evento automatico nella timeline della chat."""
+    clean = " ".join(str(body or "").replace("\r", " ").replace("\n", " ").split()).strip()
+    if not clean:
+        raise ValueError("Messaggio di sistema vuoto.")
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        manager = conn.execute("SELECT name FROM teams WHERE is_admin=1 ORDER BY name LIMIT 1").fetchone()
+        if not manager:
+            return None
+        team = manager["name"]
+        cur = conn.execute(
+            "INSERT INTO chat_messages(ts,team,body,system) VALUES (?,?,?,1)",
+            (now, team, clean),
+        )
+        mid = int(cur.lastrowid)
+        row = conn.execute(
+            "SELECT c.id,c.ts,c.team,c.body,c.system,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id=?",
+            (mid,),
+        ).fetchone()
+        conn.commit()
+        return _chat_row_to_dict(row)
 
 
 def get_chat_messages(limit: int = 120, after_id: int = 0):
@@ -1136,18 +1169,15 @@ def get_chat_messages(limit: int = 120, after_id: int = 0):
     with get_conn() as conn:
         if after_id:
             rows = conn.execute(
-                "SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id>? ORDER BY c.id ASC LIMIT ?",
+                "SELECT c.id,c.ts,c.team,c.body,c.system,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id>? ORDER BY c.id ASC LIMIT ?",
                 (after_id, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM (SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team ORDER BY c.id DESC LIMIT ?) ORDER BY id ASC",
+                "SELECT * FROM (SELECT c.id,c.ts,c.team,c.body,c.system,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team ORDER BY c.id DESC LIMIT ?) ORDER BY id ASC",
                 (limit,),
             ).fetchall()
-        out=[]
-        for r in rows:
-            d=dict(r); d["is_manager"]=bool(d.pop("is_admin",0)); out.append(d)
-        return out
+        return [_chat_row_to_dict(r) for r in rows]
 
 
 def delete_chat_message(message_id: int):

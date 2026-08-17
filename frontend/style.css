@@ -116,3 +116,39 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 12px;backgr
 @media(max-width:560px){.chat-fab{right:13px;bottom:calc(78px + env(safe-area-inset-bottom));width:50px;height:50px}.chat-panel{right:0;top:auto;bottom:0;width:100%;height:min(78dvh,680px);border-left:0;border-top:1px solid rgba(192,132,252,.28);border-radius:22px 22px 0 0;padding-top:0}.chat-head{padding-top:14px}.chat-list{padding-bottom:14px}}
 
 body.release-active .chat-fab{bottom:calc(158px + env(safe-area-inset-bottom))}
+
+
+/* v13 · chat desktop, admin compatto e rifiniture offerta */
+#bidInline + .button-row{margin-top:14px}
+.teams-compact-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:12px 13px;border:1px solid rgba(98,214,155,.22);border-radius:13px;background:rgba(98,214,155,.07)}
+.teams-compact-summary>div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.teams-compact-summary strong{font-size:14px}
+.teams-compact-summary span{font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.chat-system{display:flex;flex-direction:column;align-items:center;gap:3px;margin:11px auto 15px;max-width:94%;text-align:center}
+.chat-system-body{padding:7px 11px;border-radius:999px;background:rgba(168,85,247,.12);border:1px solid rgba(192,132,252,.2);color:#e8dcf8;font-size:11px;font-weight:850}
+.chat-system-time{font-size:9px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+@media(min-width:1180px){
+  body.auction-page .app{margin-left:calc(50% - 572px);margin-right:0}
+  body.auction-page .bottom-nav{left:calc(50% - 572px);transform:none;width:760px}
+  body.auction-page .chat-panel,
+  body.auction-page .chat-panel.hidden{
+    display:grid!important;
+    left:calc(50% + 212px);
+    right:auto;
+    top:16px;
+    bottom:16px;
+    width:360px;
+    height:auto;
+    border:1px solid rgba(192,132,252,.26);
+    border-radius:18px;
+    overflow:hidden;
+    padding-top:0;
+    padding-bottom:0;
+    box-shadow:0 16px 42px rgba(0,0,0,.34);
+  }
+  body.auction-page .chat-fab,
+  body.auction-page .chat-backdrop,
+  body.auction-page #chatClose{display:none!important}
+  body.auction-page .release-sticky-bar{left:calc(50% - 192px)}
+}
