@@ -1,4 +1,4 @@
-# Rannatoni v13
+# Rannatoni v14
 
 Web-app/PWA per l'**asta di riparazione** della lega Rannatoni, con FastAPI, WebSocket e SQLite.
 
@@ -76,6 +76,12 @@ I popup del calciatore mostrano foto, ruoli, nome, squadra e solo:
 
 Le altre statistiche possono restare importate nel database, ma non vengono mostrate nell'interfaccia operativa.
 
+## Configurazione squadre
+
+- `Genera username per tutti` imposta automaticamente ogni username uguale al nome della squadra.
+- `Genera PIN per tutti` crea PIN temporanei casuali di 4 cifre.
+- Dopo il salvataggio la sezione Squadre si richiude in un riepilogo compatto.
+
 ## Chat Rannatoni
 
 - Chat generale realtime salvata in SQLite.
@@ -87,7 +93,7 @@ Le altre statistiche possono restare importate nel database, ma non vengono most
 
 ## Storico
 
-- Tap su foto/nome del giocatore: scheda statistiche.
+- Tap esclusivamente sulla foto del giocatore: scheda statistiche.
 - Tap sulla card/risultato: dettaglio asta con offerte e svincoli.
 - Vittorie casuali indicate chiaramente con `🎲 VITTORIA CASUALE`.
 

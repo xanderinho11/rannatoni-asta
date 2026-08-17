@@ -48,14 +48,14 @@
     </section>
 
     <section id="teamsCard" class="card accent">
-      <div class="row between wrap-row">
-        <div><h2 style="margin-bottom:4px">3. Configura squadre</h2><div class="small muted">Username, PIN temporaneo, residuo (anche negativo) e gestore.</div></div>
+      <div class="row between wrap-row teams-card-head">
+        <div><h2>3. Configura squadre</h2><div class="small muted teams-card-subtitle">Username, PIN temporaneo, residuo (anche negativo) e gestore.</div></div>
         <button id="toggleTeamsBtn" class="btn-ghost btn-sm hidden">Gestisci squadre ›</button>
       </div>
       <div id="teamsSummary" class="hidden"></div>
       <div id="teamsEditor">
         <div class="notice" style="margin-top:12px">🔐 Inserisci gli username, poi genera PIN temporanei casuali di 4 cifre. Al primo accesso ogni Rannatone dovrà scegliere il proprio PIN personale.</div>
-        <button id="generatePinsBtn" class="btn-ghost btn-block" style="margin-top:10px">🎲 Genera PIN per tutti</button>
+        <div class="grid2 mobile1 teams-generator-row"><button id="generateUsernamesBtn" class="btn-ghost btn-block">👤 Genera username per tutti</button><button id="generatePinsBtn" class="btn-ghost btn-block">🎲 Genera PIN per tutti</button></div>
         <div class="spacer"></div><div id="teamsBox"></div><div id="configErr" class="error"></div>
         <div class="button-row stack-mobile"><button id="saveConfigBtn" class="btn-primary">Salva configurazione</button><button id="copyCredsBtn" class="btn-ghost">Copia PIN temporanei</button></div>
       </div>
@@ -112,6 +112,7 @@ function renderTeams(){const box=$('teamsBox'),summary=$('teamsSummary'),editor=
   const f4=document.createElement('div');f4.className='field';const l4=document.createElement('label');l4.textContent='Gestione asta';const lab=document.createElement('label');lab.className='radio-manager';const radio=document.createElement('input');radio.type='radio';radio.name='manager';radio.value=t.name;radio.checked=!!t.is_admin;lab.append(radio,document.createTextNode('Questa squadra gestisce l\'asta'));f4.append(l4,lab);
   grid.append(f1,f2,f3,f4);card.appendChild(grid);box.appendChild(card);teamRefs.set(t.name,{username:u,pin:p,budget:b,manager:radio})})}
 function randomPin4(used){for(let i=0;i<100;i++){const a=new Uint32Array(1);crypto.getRandomValues(a);const pin=String(1000+(a[0]%9000));if(!used.has(pin)){used.add(pin);return pin}}throw new Error('Non riesco a generare PIN univoci.')}
+$('generateUsernamesBtn').onclick=()=>{if(!teams.length)return toast('Carica prima il file rose.',true);let count=0;for(const t of teams){const refs=teamRefs.get(t.name);if(!refs?.username)continue;refs.username.value=t.name;count++}toast(`Generati ${count} username uguali al nome squadra`)};
 $('generatePinsBtn').onclick=()=>{try{const missingUser=teams.find(t=>!teamRefs.get(t.name)?.username?.value.trim());if(missingUser)return toast(`Inserisci prima lo username di ${missingUser.name}.`,true);const used=new Set(temporaryPins.values()),created=[];for(const t of teams){const refs=teamRefs.get(t.name);if(!refs?.pin)continue;const pin=randomPin4(used);refs.pin.value=pin;temporaryPins.set(t.name,pin);created.push(t.name)}if(!created.length)return toast('Tutte le squadre hanno già un PIN.',true);toast(`Generati ${created.length} PIN temporanei di 4 cifre`)}catch(e){toast(e.message,true)}};
 $('toggleTeamsBtn').onclick=()=>{teamsExpanded=!teamsExpanded;renderTeams()};
 function collectConfig(){return teams.map(t=>{const r=teamRefs.get(t.name);return{name:t.name,username:r.username.value.trim(),pin:r.pin?r.pin.value.trim():null,budget:Number(r.budget.value),is_admin:r.manager.checked}})}
