@@ -247,6 +247,11 @@ class Auction:
             result = {
                 "type": "no_offers", "pid": pid,
                 "player_name": player["name"] if player else f"ID {pid}",
+                "player_full_name": (player.get("full_name") or player.get("name")) if player else f"ID {pid}",
+                "player_roles": list(player.get("roles") or []) if player else [],
+                "player_club": player.get("club", "") if player else "",
+                "player_img": player.get("img", "") if player else "",
+                "player_stats": dict(player.get("stats") or {}) if player else {},
                 "reveal": reveal, "rounds": list(self.round_history),
             }
             self.reset(persist=False)
@@ -289,6 +294,11 @@ class Auction:
         result = {
             "type": "assigned", "team": team, "pid": pid,
             "player_name": player["name"] if player else f"ID {pid}",
+            "player_full_name": (player.get("full_name") or player.get("name")) if player else f"ID {pid}",
+            "player_roles": list(player.get("roles") or []) if player else [],
+            "player_club": player.get("club", "") if player else "",
+            "player_img": player.get("img", "") if player else "",
+            "player_stats": dict(player.get("stats") or {}) if player else {},
             "price": int(price), "reveal": reveal,
             "rounds": list(self.round_history), "tocca": bool(tocca),
             "release_floor_applied": int(release_floor or 0),

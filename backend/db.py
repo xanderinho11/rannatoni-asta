@@ -122,6 +122,15 @@ def init_db():
                 FOREIGN KEY (team) REFERENCES teams(name) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_push_team ON push_subscriptions(team);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                team TEXT NOT NULL,
+                body TEXT NOT NULL,
+                FOREIGN KEY (team) REFERENCES teams(name) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_id ON chat_messages(id);
             """
         )
 
@@ -405,6 +414,7 @@ def reset_all(keep_catalog: bool = False):
         conn.execute("DELETE FROM auction_state")
         conn.execute("DELETE FROM auction_events")
         conn.execute("DELETE FROM passed_players")
+        conn.execute("DELETE FROM chat_messages")
         conn.execute("DELETE FROM roster")
         conn.execute("DELETE FROM teams")
         if not keep_catalog:
@@ -629,6 +639,7 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
         conn.execute("DELETE FROM auction_events")
         conn.execute("DELETE FROM auction_state")
         conn.execute("DELETE FROM passed_players")
+        conn.execute("DELETE FROM chat_messages")
 
         placeholders = ",".join("?" for _ in teams)
         conn.execute(f"DELETE FROM teams WHERE name NOT IN ({placeholders})", teams)
@@ -681,6 +692,43 @@ def search_players(query: str, limit: int = 30, exclude_assigned: bool = True):
 
 
 # ---------- ROSTER ----------
+def _session_start_event_id_conn(conn) -> int:
+    row = conn.execute("SELECT value FROM settings WHERE key='auction_session_start_event_id'").fetchone()
+    try:
+        return int(row["value"] or 0) if row else 0
+    except Exception:
+        return 0
+
+
+def mark_auction_session_start():
+    """Fissa il confine tra rosa iniziale e acquisti della sessione corrente."""
+    with get_conn() as conn:
+        last_id = int(conn.execute("SELECT COALESCE(MAX(id),0) FROM auction_events").fetchone()[0] or 0)
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('auction_session_start_event_id',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(last_id),),
+        )
+        conn.commit()
+        return last_id
+
+
+def session_acquired_player_ids(team: str | None = None) -> set[int]:
+    with get_conn() as conn:
+        start_id = _session_start_event_id_conn(conn)
+        if team:
+            rows = conn.execute(
+                "SELECT DISTINCT pid FROM auction_events WHERE id>? AND undone=0 AND event_type='assigned' AND team=? AND pid IS NOT NULL",
+                (start_id, team),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT pid FROM auction_events WHERE id>? AND undone=0 AND event_type='assigned' AND pid IS NOT NULL",
+                (start_id,),
+            ).fetchall()
+        return {int(r["pid"]) for r in rows}
+
+
 def get_roster(team: str):
     with get_conn() as conn:
         rows = conn.execute(
@@ -691,7 +739,16 @@ def get_roster(team: str):
             """,
             (team,),
         ).fetchall()
-        return [_player_row_to_dict(r) for r in rows]
+        start_id = _session_start_event_id_conn(conn)
+        acquired_rows = conn.execute(
+            "SELECT DISTINCT pid FROM auction_events WHERE id>? AND undone=0 AND event_type='assigned' AND team=? AND pid IS NOT NULL",
+            (start_id, team),
+        ).fetchall()
+        acquired = {int(r["pid"]) for r in acquired_rows}
+        out = [_player_row_to_dict(r) for r in rows]
+        for item in out:
+            item["acquired_this_session"] = int(item["pid"]) in acquired
+        return out
 
 
 def get_all_rosters():
@@ -872,6 +929,25 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
         rosa = {r["pid"]: {"price": r["price"], "roles": json.loads(r["roles"] or "[]")} for r in rows}
         if any(p not in rosa for p in released_pids):
             raise ValueError("Uno o piu' giocatori selezionati non appartengono alla squadra.")
+
+        # Regola asta di riparazione: un acquisto effettuato nella sessione
+        # corrente non puo' essere svincolato nella stessa sessione. Il controllo
+        # e' server-side, quindi non e' aggirabile modificando il client.
+        session_start_id = _session_start_event_id_conn(conn)
+        bought_now = {
+            int(r["pid"]) for r in conn.execute(
+                "SELECT DISTINCT pid FROM auction_events WHERE id>? AND undone=0 AND event_type='assigned' AND team=? AND pid IS NOT NULL",
+                (session_start_id, team),
+            ).fetchall()
+        }
+        forbidden = sorted(set(released_pids) & bought_now)
+        if forbidden:
+            names = []
+            for forbidden_pid in forbidden[:6]:
+                prow = conn.execute("SELECT name FROM players WHERE pid=?", (forbidden_pid,)).fetchone()
+                names.append(prow["name"] if prow else f"ID {forbidden_pid}")
+            raise ValueError("Non puoi svincolare giocatori acquistati in questa sessione d'asta: " + ", ".join(names))
+
         refund = sum(int(REIMBURSE_RATE * rosa[p]["price"]) for p in released_pids)
         if squadra["budget"] + refund < int(price):
             raise ValueError("Crediti insufficienti anche dopo gli svincoli selezionati.")
@@ -1029,6 +1105,60 @@ def push_subscriptions_for_teams(teams: list[str] | set[str]):
             }
             for r in rows
         ]
+
+
+# ---------- CHAT ----------
+def add_chat_message(team: str, body: str):
+    clean = " ".join(str(body or "").replace("\r", " ").replace("\n", " ").split()).strip()
+    if not clean:
+        raise ValueError("Scrivi un messaggio.")
+    if len(clean) > 500:
+        raise ValueError("Il messaggio puo' contenere al massimo 500 caratteri.")
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM teams WHERE name=?", (team,)).fetchone():
+            raise ValueError("Squadra non trovata.")
+        cur = conn.execute("INSERT INTO chat_messages(ts,team,body) VALUES (?,?,?)", (now, team, clean))
+        mid = int(cur.lastrowid)
+        row = conn.execute(
+            "SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id=?",
+            (mid,),
+        ).fetchone()
+        conn.commit()
+        d = dict(row)
+        d["is_manager"] = bool(d.pop("is_admin", 0))
+        return d
+
+
+def get_chat_messages(limit: int = 120, after_id: int = 0):
+    limit = max(1, min(int(limit), 250))
+    after_id = max(0, int(after_id or 0))
+    with get_conn() as conn:
+        if after_id:
+            rows = conn.execute(
+                "SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team WHERE c.id>? ORDER BY c.id ASC LIMIT ?",
+                (after_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM (SELECT c.id,c.ts,c.team,c.body,t.is_admin FROM chat_messages c JOIN teams t ON t.name=c.team ORDER BY c.id DESC LIMIT ?) ORDER BY id ASC",
+                (limit,),
+            ).fetchall()
+        out=[]
+        for r in rows:
+            d=dict(r); d["is_manager"]=bool(d.pop("is_admin",0)); out.append(d)
+        return out
+
+
+def delete_chat_message(message_id: int):
+    with get_conn() as conn:
+        row = conn.execute("SELECT id,team FROM chat_messages WHERE id=?", (int(message_id),)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        conn.execute("DELETE FROM chat_messages WHERE id=?", (int(message_id),))
+        conn.commit()
+        return d
 
 
 # ---------- STORICO ----------

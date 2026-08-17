@@ -228,6 +228,19 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect(ws)
 
+    async def broadcast_team_event(self, event_type: str, data: dict):
+        """Evento realtime riservato ai Rannatoni autenticati (non spettatori)."""
+        dead = []
+        for ws, info in list(self.connections.items()):
+            if info.get("role") != "team":
+                continue
+            try:
+                await ws.send_json({"type": event_type, "data": data})
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(ws)
+
 
 manager = ConnectionManager()
 AUCTION_LOCK = asyncio.Lock()
@@ -400,6 +413,7 @@ async def admin_start_auction(_: dict = Depends(require_superadmin)):
     if sum(1 for t in teams if t.get("is_admin")) != 1:
         raise HTTPException(400, "Configura esattamente un Gestore asta.")
 
+    db.mark_auction_session_start()
     db.set_setting("auction_started", "1")
     backup_if_real("avvio ufficiale asta")
     await broadcast_state()
@@ -533,6 +547,7 @@ async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require
     _cancel_auto_random()
     db.set_setting("auto_random", "0")
     db.set_setting("auction_started", "0")
+    db.set_setting("auction_session_start_event_id", "0")
     auction.reset(persist=True)
     storage.salva("caricamento rose")
     await broadcast_state()
@@ -745,6 +760,36 @@ def spectator_rosters(_: dict = Depends(require_spectator)):
 @app.get("/api/spectator/free-agents")
 def spectator_free_agents(_: dict = Depends(require_spectator)):
     return db.get_free_agents(None)
+
+
+class ChatMessageBody(BaseModel):
+    message: str = Field(min_length=1, max_length=500)
+
+
+@app.get("/api/chat")
+def chat_history(after_id: int = 0, limit: int = 120, session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    return {"messages": db.get_chat_messages(limit=limit, after_id=after_id)}
+
+
+@app.post("/api/chat")
+async def chat_send(body: ChatMessageBody, session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    try:
+        message = db.add_chat_message(session["team"], body.message)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await manager.broadcast_team_event("chat_message", message)
+    return {"ok": True, "message": message}
+
+
+@app.delete("/api/chat/{message_id}")
+async def chat_delete(message_id: int, _: dict = Depends(require_auction_manager)):
+    deleted = db.delete_chat_message(message_id)
+    if not deleted:
+        raise HTTPException(404, "Messaggio non trovato.")
+    await manager.broadcast_team_event("chat_deleted", {"id": int(message_id)})
+    return {"ok": True, "id": int(message_id)}
 
 
 class PushSubscriptionBody(BaseModel):
