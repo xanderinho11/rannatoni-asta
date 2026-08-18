@@ -168,3 +168,15 @@ body.release-active .chat-fab{bottom:calc(158px + env(safe-area-inset-bottom))}
 .stats-photo:active{opacity:.82}
 @media(min-width:760px){body{background:var(--bg)}body.auction-page{background:var(--bg)}body.auction-page .app{background:transparent}}
 @media(max-width:560px){.teams-card-head{gap:12px;margin-bottom:14px}.teams-generator-row{margin-top:14px}.teams-compact-summary{align-items:stretch;flex-direction:column}.teams-compact-summary .btn-ghost{width:100%;margin-left:0!important}}
+
+/* v15 · reveal assegnazione casuale senza layout shift */
+.last-result-random-price-label{font-size:10px;font-weight:850;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.random-reveal-box{height:142px;box-sizing:border-box;margin-top:10px;padding:16px 14px;border:1px solid rgba(192,132,252,.34);border-radius:14px;background:rgba(168,85,247,.10);display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;overflow:hidden}
+.random-reveal-copy{min-height:40px;display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1.35;font-weight:850;color:#eadcff;max-width:420px}
+.random-reveal-name{height:42px;max-width:100%;display:flex;align-items:center;justify-content:center;margin-top:7px;font-size:23px;line-height:1.05;font-weight:1000;color:var(--accent3);overflow:hidden;text-overflow:ellipsis;text-align:center;overflow-wrap:anywhere}
+.random-reveal-name.rolling{animation:randomNamePulse .34s ease-in-out infinite alternate}
+.random-reveal-name.winner{font-size:25px;animation:randomWinnerIn .28s ease-out both}
+@keyframes randomNamePulse{from{opacity:.62;transform:scale(.985)}to{opacity:1;transform:scale(1.015)}}
+@keyframes randomWinnerIn{from{opacity:.25;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+@media(max-width:420px){.random-reveal-box{height:148px;padding:14px 12px}.random-reveal-copy{font-size:12px}.random-reveal-name{font-size:21px}.random-reveal-name.winner{font-size:23px}}
+@media(prefers-reduced-motion:reduce){.random-reveal-name.rolling,.random-reveal-name.winner{animation:none}}

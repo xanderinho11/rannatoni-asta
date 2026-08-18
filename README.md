@@ -73,6 +73,7 @@ I popup del calciatore mostrano foto, ruoli, nome, squadra e solo:
 - Media voto
 - Fantamedia
 - Quotazione
+- Presenze
 
 Le altre statistiche possono restare importate nel database, ma non vengono mostrate nell'interfaccia operativa.
 
@@ -95,7 +96,7 @@ Le altre statistiche possono restare importate nel database, ma non vengono most
 
 - Tap esclusivamente sulla foto del giocatore: scheda statistiche.
 - Tap sulla card/risultato: dettaglio asta con offerte e svincoli.
-- Vittorie casuali indicate chiaramente con `🎲 VITTORIA CASUALE`.
+- Le assegnazioni casuali dopo uno spareggio pari usano un reveal di circa 4–5 secondi; il vincitore è già deciso dal backend e l’animazione non causa refresh o salti di layout.
 
 ## Backup e reset
 
@@ -114,3 +115,8 @@ La password `ADMIN_PASSWORD`, il codice dell'app e il volume Railway non vengono
 ## Railway
 
 Il progetto include `Dockerfile` e `railway.toml`. In produzione il volume persistente resta montato su `/app/data` e la porta pubblica usata dal progetto è 8080.
+
+
+## Assegnazione casuale
+
+Quando uno spareggio resta pari perché nessuno alza la propria offerta, il backend decide subito il vincitore tra le sole squadre ancora in parità. Il frontend mostra poi un reveal di circa 4–5 secondi con alternanza dei nomi e rallentamento progressivo. La card ha altezza fissa e gli aggiornamenti realtime dello stesso risultato non la ricreano, così durante l’animazione non cambiano scroll, input o layout.

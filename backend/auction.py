@@ -303,6 +303,8 @@ class Auction:
             "rounds": list(self.round_history), "tocca": bool(tocca),
             "release_floor_applied": int(release_floor or 0),
         }
+        if tocca:
+            result["random_candidates"] = sorted(str(t) for t in reveal.keys())
 
         deficit = max(0, int(price) - int(squadra["budget"]))
         slots_needed = max(0, len(roster) + 1 - db.MAX_ROSA)
