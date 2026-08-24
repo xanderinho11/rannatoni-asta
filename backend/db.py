@@ -28,6 +28,22 @@ MAX_GOALKEEPERS = 5
 MIN_OUTFIELD = 21
 REIMBURSE_RATE = 1.0
 
+# Valori predefiniti della lega. Restano identici alla configurazione storica
+# di Rannatoni, ma da v17 le regole effettive vengono lette dalla tabella
+# settings invece di essere hardcoded nella logica d'asta.
+DEFAULT_LEAGUE_SETTINGS = {
+    "auction_mode": "repair",
+    "team_count": 12,
+    "initial_budget": BUDGET_INITIAL,
+    "max_roster": MAX_ROSA,
+    "min_goalkeepers": MIN_GOALKEEPERS,
+    "max_goalkeepers": MAX_GOALKEEPERS,
+    "min_outfield": MIN_OUTFIELD,
+    "bid_duration": 60,
+    "auto_random_delay": 10,
+}
+_LEAGUE_SETTING_KEYS = {key: f"league_{key}" for key in DEFAULT_LEAGUE_SETTINGS}
+
 
 @contextmanager
 def get_conn():
@@ -181,6 +197,160 @@ def init_db():
         conn.commit()
 
 
+# ---------- CONFIGURAZIONE LEGA ----------
+def _coerce_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def get_league_settings() -> dict:
+    """Restituisce sempre una configurazione completa e retrocompatibile."""
+    defaults = dict(DEFAULT_LEAGUE_SETTINGS)
+    with get_conn() as conn:
+        keys = tuple(_LEAGUE_SETTING_KEYS.values())
+        placeholders = ",".join("?" for _ in keys)
+        rows = conn.execute(
+            f"SELECT key,value FROM settings WHERE key IN ({placeholders})", keys
+        ).fetchall()
+    raw = {r["key"]: r["value"] for r in rows}
+    mode = str(raw.get(_LEAGUE_SETTING_KEYS["auction_mode"], defaults["auction_mode"]) or "repair").strip().lower()
+    defaults["auction_mode"] = mode if mode in ("repair", "zero") else "repair"
+    for key in ("team_count", "initial_budget", "max_roster", "min_goalkeepers",
+                "max_goalkeepers", "min_outfield", "bid_duration", "auto_random_delay"):
+        defaults[key] = _coerce_int(raw.get(_LEAGUE_SETTING_KEYS[key]), defaults[key])
+    return defaults
+
+
+def validate_league_settings(values: dict) -> dict:
+    current = get_league_settings()
+    merged = {**current, **(values or {})}
+    mode = str(merged.get("auction_mode") or "repair").strip().lower()
+    if mode not in ("repair", "zero"):
+        raise ValueError("Modalita' asta non valida.")
+
+    cfg = {
+        "auction_mode": mode,
+        "team_count": _coerce_int(merged.get("team_count"), current["team_count"]),
+        "initial_budget": _coerce_int(merged.get("initial_budget"), current["initial_budget"]),
+        "max_roster": _coerce_int(merged.get("max_roster"), current["max_roster"]),
+        "min_goalkeepers": _coerce_int(merged.get("min_goalkeepers"), current["min_goalkeepers"]),
+        "max_goalkeepers": _coerce_int(merged.get("max_goalkeepers"), current["max_goalkeepers"]),
+        "min_outfield": _coerce_int(merged.get("min_outfield"), current["min_outfield"]),
+        "bid_duration": _coerce_int(merged.get("bid_duration"), current["bid_duration"]),
+        "auto_random_delay": _coerce_int(merged.get("auto_random_delay"), current["auto_random_delay"]),
+    }
+    if not 2 <= cfg["team_count"] <= 50:
+        raise ValueError("Il numero di squadre deve essere compreso tra 2 e 50.")
+    if not 1 <= cfg["initial_budget"] <= 1_000_000:
+        raise ValueError("I crediti iniziali devono essere compresi tra 1 e 1.000.000.")
+    if not 1 <= cfg["max_roster"] <= 100:
+        raise ValueError("I posti massimi in rosa devono essere compresi tra 1 e 100.")
+    if not 0 <= cfg["min_goalkeepers"] <= cfg["max_goalkeepers"]:
+        raise ValueError("I portieri minimi non possono superare i portieri massimi.")
+    if cfg["max_goalkeepers"] > cfg["max_roster"]:
+        raise ValueError("I portieri massimi non possono superare i posti massimi in rosa.")
+    if not 0 <= cfg["min_outfield"] <= cfg["max_roster"]:
+        raise ValueError("Il minimo di giocatori di movimento non e' valido.")
+    if cfg["min_goalkeepers"] + cfg["min_outfield"] > cfg["max_roster"]:
+        raise ValueError("Portieri minimi + giocatori di movimento minimi superano la capienza della rosa.")
+    if not 10 <= cfg["bid_duration"] <= 300:
+        raise ValueError("La durata della busta deve essere compresa tra 10 e 300 secondi.")
+    if not 0 <= cfg["auto_random_delay"] <= 120:
+        raise ValueError("La pausa RANDOM deve essere compresa tra 0 e 120 secondi.")
+    return cfg
+
+
+def _clear_setup_conn(conn, clear_teams: bool):
+    conn.execute("DELETE FROM auction_state")
+    conn.execute("DELETE FROM auction_events")
+    conn.execute("DELETE FROM passed_players")
+    conn.execute("DELETE FROM chat_messages")
+    conn.execute("DELETE FROM push_subscriptions")
+    conn.execute("DELETE FROM roster")
+    if clear_teams:
+        conn.execute("DELETE FROM teams")
+    conn.execute(
+        "DELETE FROM settings WHERE key IN ('auction_started','auto_random','auction_session_start_event_id','auction_pool_total','simulation_active')"
+    )
+
+
+def apply_league_settings(values: dict) -> dict:
+    """Salva le regole e prepara il setup coerente con la modalita' scelta.
+
+    Il catalogo/statistiche restano intatti. Il setup squadre/rose viene ricreato
+    solo quando cambia la modalita' oppure, in asta da zero, cambia il numero di
+    squadre.
+    """
+    cfg = validate_league_settings(values)
+    old = get_league_settings()
+    mode_changed = cfg["auction_mode"] != old["auction_mode"]
+    rebuilt = False
+
+    with get_conn() as conn:
+        current_team_count = int(conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0] or 0)
+        roster_count = int(conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0] or 0)
+
+        if cfg["auction_mode"] == "zero":
+            need_rebuild = mode_changed or roster_count > 0 or current_team_count != cfg["team_count"]
+            if need_rebuild:
+                _clear_setup_conn(conn, clear_teams=True)
+                for idx in range(1, cfg["team_count"] + 1):
+                    conn.execute(
+                        "INSERT INTO teams(name,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished) "
+                        "VALUES (?,NULL,'','',1,?,0,0,0)",
+                        (f"Squadra {idx}", cfg["initial_budget"]),
+                    )
+                rebuilt = True
+            else:
+                # Prima dell'avvio tutte le squadre di un'asta da zero devono
+                # partire dallo stesso monte crediti configurato.
+                conn.execute(
+                    "UPDATE teams SET budget=?, ready=0, market_finished=0",
+                    (cfg["initial_budget"],),
+                )
+            total_players = int(conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] or 0)
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(total_players),),
+            )
+        elif mode_changed:
+            # Tornando alla riparazione si riparte dal caricamento Rose.
+            _clear_setup_conn(conn, clear_teams=True)
+            rebuilt = True
+
+        for key, value in cfg.items():
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_LEAGUE_SETTING_KEYS[key], str(value)),
+            )
+        conn.commit()
+    return {"settings": cfg, "setup_rebuilt": rebuilt}
+
+
+def auction_mode() -> str:
+    return get_league_settings()["auction_mode"]
+
+
+def max_roster() -> int:
+    return int(get_league_settings()["max_roster"])
+
+
+def max_goalkeepers() -> int:
+    return int(get_league_settings()["max_goalkeepers"])
+
+
+def bid_duration() -> int:
+    return int(get_league_settings()["bid_duration"])
+
+
+def auto_random_delay() -> int:
+    return int(get_league_settings()["auto_random_delay"])
+
+
 # ---------- PIN / CREDENZIALI ----------
 _PIN_ITERATIONS = 220_000
 
@@ -308,9 +478,10 @@ def username_taken_by_other(username: str, team_name: str) -> bool:
 
 
 def save_team_configuration(items: list[dict]):
-    """Salva configurazione e, solo se fornito, imposta un nuovo PIN temporaneo.
+    """Salva nomi/accessi/crediti e il Gestore.
 
-    Il PIN esistente non viene mai restituito ne' richiesto per risalvare residui/username.
+    In modalita' asta da zero il nome delle squadre puo' essere cambiato finche'
+    il setup e' ancora vuoto; in riparazione i nomi arrivano dal file Rose.
     """
     if not items:
         raise ValueError("Nessuna squadra da salvare.")
@@ -321,30 +492,54 @@ def save_team_configuration(items: list[dict]):
     usernames = [str(x.get("username", "")).strip().lower() for x in items]
     if any(not u for u in usernames) or len(usernames) != len(set(usernames)):
         raise ValueError("Ogni squadra deve avere uno username univoco.")
+    names = [str(x.get("name", "")).strip() for x in items]
+    if any(not n for n in names) or len(names) != len(set(names)):
+        raise ValueError("Ogni squadra deve avere un nome univoco.")
+
+    rules = get_league_settings()
+    zero_mode = rules["auction_mode"] == "zero"
 
     with get_conn() as conn:
         existing_rows = conn.execute("SELECT name, pin_hash FROM teams").fetchall()
+        existing_names = {r["name"] for r in existing_rows}
+        originals = [str(x.get("original_name") or x.get("name") or "").strip() for x in items]
+        if set(originals) != existing_names or len(originals) != len(existing_names):
+            raise ValueError("La configurazione deve includere tutte le squadre presenti.")
+
+        renames = [(old, new) for old, new in zip(originals, names) if old != new]
+        if renames:
+            if not zero_mode:
+                raise ValueError("Nell'asta di riparazione i nomi squadra arrivano dal file Rose e non possono essere rinominati qui.")
+            dependent = sum(int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0) for table in ("roster", "auction_events", "chat_messages", "push_subscriptions"))
+            if dependent:
+                raise ValueError("Non puoi rinominare le squadre dopo che il mercato ha iniziato a produrre dati.")
+            temp_pairs = []
+            for idx, (old, new) in enumerate(renames):
+                tmp = f"__rename_{idx}_{secrets.token_hex(6)}"
+                conn.execute("UPDATE teams SET name=? WHERE name=?", (tmp, old))
+                temp_pairs.append((tmp, new))
+            for tmp, new in temp_pairs:
+                conn.execute("UPDATE teams SET name=? WHERE name=?", (new, tmp))
+
+        existing_rows = conn.execute("SELECT name, pin_hash FROM teams").fetchall()
         existing = {r["name"]: r["pin_hash"] for r in existing_rows}
-        requested = {str(x["name"]).strip() for x in items}
-        missing = requested - set(existing)
-        if missing:
-            raise ValueError("Squadre non trovate: " + ", ".join(sorted(missing)))
         for x in items:
             name = str(x["name"]).strip()
             pin = str(x.get("pin") or "").strip()
             if not pin and not existing.get(name):
                 raise ValueError(f"Devi impostare un PIN temporaneo per {name}.")
+            budget = int(rules["initial_budget"]) if zero_mode else int(x["budget"])
             if pin:
                 encoded = hash_pin(pin)
                 conn.execute(
                     """UPDATE teams SET username=?, pin='', pin_hash=?, pin_must_change=1,
                        budget=?, is_admin=?, ready=0, market_finished=0 WHERE name=?""",
-                    (str(x["username"]).strip(), encoded, int(x["budget"]), 1 if x.get("is_admin") else 0, name),
+                    (str(x["username"]).strip(), encoded, budget, 1 if x.get("is_admin") else 0, name),
                 )
             else:
                 conn.execute(
                     "UPDATE teams SET username=?, budget=?, is_admin=? WHERE name=?",
-                    (str(x["username"]).strip(), int(x["budget"]), 1 if x.get("is_admin") else 0, name),
+                    (str(x["username"]).strip(), budget, 1 if x.get("is_admin") else 0, name),
                 )
         conn.commit()
 
@@ -484,6 +679,15 @@ def replace_catalog(players: list[dict]):
         )
         placeholders = ",".join("?" for _ in ids)
         conn.execute(f"DELETE FROM players WHERE pid NOT IN ({placeholders})", ids)
+        mode_row = conn.execute("SELECT value FROM settings WHERE key=?", (_LEAGUE_SETTING_KEYS["auction_mode"],)).fetchone()
+        mode = str(mode_row["value"] if mode_row else DEFAULT_LEAGUE_SETTINGS["auction_mode"]).strip().lower()
+        if mode == "zero":
+            assigned = int(conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0] or 0)
+            conn.execute(
+                "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(max(0, len(ids) - assigned)),),
+            )
         conn.commit()
 
 
@@ -791,24 +995,29 @@ def roster_summary(team: str):
     keepers = sum(1 for g in roster if _is_goalkeeper_roles(g.get("roles")))
     total = len(roster)
     outfield = total - keepers
+    rules = get_league_settings()
+    min_gk = int(rules["min_goalkeepers"])
+    max_gk = int(rules["max_goalkeepers"])
+    min_out = int(rules["min_outfield"])
+    max_size = int(rules["max_roster"])
     issues = []
-    if keepers < MIN_GOALKEEPERS:
-        issues.append(f"Servono almeno {MIN_GOALKEEPERS} portieri (ora {keepers}).")
-    if keepers > MAX_GOALKEEPERS:
-        issues.append(f"Puoi avere al massimo {MAX_GOALKEEPERS} portieri (ora {keepers}).")
-    if outfield < MIN_OUTFIELD:
-        issues.append(f"Servono almeno {MIN_OUTFIELD} giocatori di movimento (ora {outfield}).")
-    if total > MAX_ROSA:
-        issues.append(f"La rosa puo' avere al massimo {MAX_ROSA} giocatori (ora {total}).")
+    if keepers < min_gk:
+        issues.append(f"Servono almeno {min_gk} portieri (ora {keepers}).")
+    if keepers > max_gk:
+        issues.append(f"Puoi avere al massimo {max_gk} portieri (ora {keepers}).")
+    if outfield < min_out:
+        issues.append(f"Servono almeno {min_out} giocatori di movimento (ora {outfield}).")
+    if total > max_size:
+        issues.append(f"La rosa puo' avere al massimo {max_size} giocatori (ora {total}).")
     return {
         "goalkeepers": keepers,
         "outfield": outfield,
         "total": total,
-        "free_slots": max(0, MAX_ROSA-total),
-        "min_goalkeepers": MIN_GOALKEEPERS,
-        "max_goalkeepers": MAX_GOALKEEPERS,
-        "min_outfield": MIN_OUTFIELD,
-        "max_roster": MAX_ROSA,
+        "free_slots": max(0, max_size-total),
+        "min_goalkeepers": min_gk,
+        "max_goalkeepers": max_gk,
+        "min_outfield": min_out,
+        "max_roster": max_size,
         "valid_finish": not issues,
         "issues": issues,
     }
@@ -901,15 +1110,18 @@ def assign_player(team: str, pid: int, price: int, charge_budget: bool = True):
         roster_rows = conn.execute(
             "SELECT p.roles FROM roster r JOIN players p ON p.pid=r.pid WHERE r.team=?", (team,)
         ).fetchall()
+        rules = get_league_settings()
+        max_size = int(rules["max_roster"])
+        max_gk = int(rules["max_goalkeepers"])
         total = len(roster_rows) + 1
-        if total > MAX_ROSA:
-            raise ValueError("Rosa oltre il limite massimo di 35 giocatori.")
+        if total > max_size:
+            raise ValueError(f"Rosa oltre il limite massimo di {max_size} giocatori.")
         newp = conn.execute("SELECT roles FROM players WHERE pid=?", (int(pid),)).fetchone()
         keepers = sum(1 for r in roster_rows if "P" in json.loads(r["roles"] or "[]"))
         if newp and "P" in json.loads(newp["roles"] or "[]"):
             keepers += 1
-        if keepers > MAX_GOALKEEPERS:
-            raise ValueError("Puoi avere al massimo 5 portieri: devi svincolarne uno.")
+        if keepers > max_gk:
+            raise ValueError(f"Puoi avere al massimo {max_gk} portieri: devi svincolarne uno.")
         conn.execute("INSERT INTO roster(team,pid,price) VALUES (?,?,?)", (team, pid, int(price)))
         conn.execute("DELETE FROM passed_players WHERE pid=?", (int(pid),))
         if charge_budget:
@@ -931,6 +1143,9 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
             (team,),
         ).fetchall()
         rosa = {r["pid"]: {"price": r["price"], "roles": json.loads(r["roles"] or "[]")} for r in rows}
+        rules = get_league_settings()
+        max_size = int(rules["max_roster"])
+        max_gk = int(rules["max_goalkeepers"])
         if any(p not in rosa for p in released_pids):
             raise ValueError("Uno o piu' giocatori selezionati non appartengono alla squadra.")
 
@@ -957,15 +1172,15 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
             raise ValueError("Crediti insufficienti anche dopo gli svincoli selezionati.")
 
         final_total = len(rosa) - len(released_pids) + 1
-        if final_total > MAX_ROSA:
+        if final_total > max_size:
             raise ValueError("Devi liberare altri posti in rosa.")
         newp = conn.execute("SELECT roles FROM players WHERE pid=?", (int(pid),)).fetchone()
         new_roles = json.loads(newp["roles"] or "[]") if newp else []
         keepers = sum(1 for p, info in rosa.items() if p not in released_pids and "P" in info["roles"])
         if "P" in new_roles:
             keepers += 1
-        if keepers > MAX_GOALKEEPERS:
-            raise ValueError("Puoi avere al massimo 5 portieri: svincola almeno un portiere.")
+        if keepers > max_gk:
+            raise ValueError(f"Puoi avere al massimo {max_gk} portieri: svincola almeno un portiere.")
 
         released = []
         for p in released_pids:

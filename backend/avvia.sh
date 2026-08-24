@@ -15,7 +15,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  RANNATONI - ASTA DI RIPARAZIONE - SERVER LOCALE"
+echo "  RANNATONI - ASTA FANTACALCIO - SERVER LOCALE"
 echo "  PC: http://localhost:8000"
 echo "  Admin: http://localhost:8000/admin"
 echo "  Password Super Admin locale: $ADMIN_PASSWORD"

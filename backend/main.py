@@ -33,7 +33,7 @@ SESSIONS_PATH = os.path.join(DATA_DIR, "sessions.json")
 SESSION_SECONDS = 24 * 60 * 60
 SIMULATION_PATH = os.path.join(DATA_DIR, "simulation_base.db")
 
-app = FastAPI(title="Rannatoni - Asta di riparazione")
+app = FastAPI(title="Rannatoni - Asta Fantacalcio")
 db.init_db()
 try:
     push_service.ensure_vapid_keys()
@@ -246,9 +246,9 @@ manager = ConnectionManager()
 AUCTION_LOCK = asyncio.Lock()
 _timer_task = None
 _presence_task = None
+_tocca_task = None
 _auto_random_task = None
 _auto_random_deadline = None
-AUTO_RANDOM_DELAY = 10
 
 
 def simulation_active():
@@ -304,12 +304,21 @@ def _teams_with_presence():
 def build_state(viewer_team: str | None = None):
     state = auction.snapshot(viewer_team)
     state["simulation"] = simulation_active()
+    state["server_now_ms"] = int(time.time() * 1000)
     state["auction_started"] = auction_started()
     state["auto_random"] = auto_random_enabled()
     state["auto_random_seconds"] = auto_random_seconds()
     state["teams"] = _teams_with_presence()
     state["active_market_count"] = sum(1 for t in state["teams"] if not t.get("market_finished"))
     state["auction_progress"] = db.get_auction_progress()
+    rules = db.get_league_settings()
+    state["league"] = {
+        "auction_mode": rules["auction_mode"],
+        "max_roster": int(rules["max_roster"]),
+        "min_goalkeepers": int(rules["min_goalkeepers"]),
+        "max_goalkeepers": int(rules["max_goalkeepers"]),
+        "min_outfield": int(rules["min_outfield"]),
+    }
     if viewer_team:
         me = db.get_team(viewer_team)
         if me:
@@ -323,7 +332,7 @@ def build_state(viewer_team: str | None = None):
                 "pin_must_change": bool(me.get("pin_must_change")),
                 "roster_size": len(roster),
                 "roster_signature": "|".join(f"{g['pid']}:{g['price']}" for g in sorted(roster, key=lambda x: x['pid'])),
-                "max_roster": db.MAX_ROSA,
+                "max_roster": db.max_roster(),
                 "roster_rules": db.roster_summary(viewer_team),
             }
             if state["me"]["is_manager"]:
@@ -390,7 +399,7 @@ async def logout(session: dict = Depends(get_session)):
 # ========= SUPER ADMIN: PREPARAZIONE =========
 @app.get("/api/admin/stats")
 def admin_stats(_: dict = Depends(require_superadmin)):
-    return {**db.count_rows(), "auction_started": auction_started()}
+    return {**db.count_rows(), "auction_started": auction_started(), "league_settings": db.get_league_settings()}
 
 
 @app.post("/api/admin/start-auction")
@@ -404,10 +413,17 @@ async def admin_start_auction(_: dict = Depends(require_superadmin)):
 
     counts = db.count_rows()
     teams = db.get_all_teams(True)
+    rules = db.get_league_settings()
     if counts.get("players", 0) <= 0:
         raise HTTPException(400, "Carica prima il Catalogo.")
-    if counts.get("roster", 0) <= 0 or not teams:
-        raise HTTPException(400, "Carica prima le Rose.")
+    if rules["auction_mode"] == "repair":
+        if counts.get("roster", 0) <= 0 or not teams:
+            raise HTTPException(400, "Carica prima le Rose.")
+    else:
+        if not teams or len(teams) != int(rules["team_count"]):
+            raise HTTPException(400, "Prepara prima tutte le squadre dell'asta da zero.")
+        if counts.get("roster", 0) != 0:
+            raise HTTPException(400, "L'asta da zero deve partire con rose vuote.")
     if any(not t.get("username") or not t.get("pin_configured") for t in teams):
         raise HTTPException(400, "Completa prima username e PIN di tutte le squadre.")
     if sum(1 for t in teams if t.get("is_admin")) != 1:
@@ -460,6 +476,7 @@ def team_suggestions(_: dict = Depends(require_superadmin)):
 
 class TeamConfigItem(BaseModel):
     name: str
+    original_name: Optional[str] = None
     username: str
     pin: Optional[str] = None
     budget: int
@@ -470,6 +487,45 @@ class TeamConfigBody(BaseModel):
     teams: list[TeamConfigItem]
 
 
+class LeagueSettingsBody(BaseModel):
+    auction_mode: str = "repair"
+    team_count: int = 12
+    initial_budget: int = 500
+    max_roster: int = 35
+    min_goalkeepers: int = 2
+    max_goalkeepers: int = 5
+    min_outfield: int = 21
+    bid_duration: int = 60
+    auto_random_delay: int = 10
+
+
+@app.post("/api/admin/league-settings")
+async def save_league_settings(body: LeagueSettingsBody, _: dict = Depends(require_superadmin)):
+    if simulation_active():
+        raise HTTPException(400, "Termina la simulazione prima di modificare le impostazioni della lega.")
+    if auction_started() or auction.mode != "idle":
+        raise HTTPException(400, "Le impostazioni della lega si possono modificare solo prima dell'avvio ufficiale.")
+    try:
+        result = db.apply_league_settings(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if result.get("setup_rebuilt"):
+        _stop_timer()
+        _cancel_tocca_task()
+        _cancel_auto_random()
+        auction.reset(persist=True)
+        # Gli slot squadra potrebbero essere stati ricreati: le vecchie sessioni
+        # partecipante non devono restare agganciate a nomi non piu' esistenti.
+        for tok, info in list(SESSIONS.items()):
+            if info.get("role") == "team":
+                SESSIONS.pop(tok, None)
+        _save_sessions()
+        manager.last_presence.clear()
+    storage.salva("impostazioni lega")
+    await broadcast_state()
+    return {"ok": True, **result}
+
+
 @app.post("/api/admin/teams/config")
 async def save_team_config(body: TeamConfigBody, _: dict = Depends(require_superadmin)):
     items = [x.model_dump() for x in body.teams]
@@ -478,8 +534,12 @@ async def save_team_config(body: TeamConfigBody, _: dict = Depends(require_super
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     for item in items:
+        old_name = str(item.get("original_name") or item.get("name") or "").strip()
+        new_name = str(item.get("name") or "").strip()
+        if old_name and old_name != new_name:
+            _invalidate_team_sessions(old_name)
         if str(item.get("pin") or "").strip():
-            _invalidate_team_sessions(str(item["name"]).strip())
+            _invalidate_team_sessions(new_name)
     storage.salva("configurazione squadre")
     await broadcast_state()
     return {"ok": True}
@@ -533,6 +593,8 @@ async def upload_statistics(file: UploadFile = File(...), _: dict = Depends(requ
 
 @app.post("/api/admin/upload/rosters")
 async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require_superadmin)):
+    if db.auction_mode() != "repair":
+        raise HTTPException(400, "Nell'asta da zero non devi caricare un file Rose.")
     raw = await file.read()
     if len(raw) > 8 * 1024 * 1024:
         raise HTTPException(413, "File troppo grande (massimo 8 MB).")
@@ -544,6 +606,7 @@ async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     _stop_timer()
+    _cancel_tocca_task()
     _cancel_auto_random()
     db.set_setting("auto_random", "0")
     db.set_setting("auction_started", "0")
@@ -602,6 +665,7 @@ class ResetBody(BaseModel):
 async def reset_all(body: ResetBody, session: dict = Depends(require_superadmin)):
     global _timer_task
     _stop_timer()
+    _cancel_tocca_task()
     _cancel_auto_random()
     keep_catalog = bool(body.keep_catalog)
     db.reset_all(keep_catalog)
@@ -702,7 +766,7 @@ def history(_: dict = Depends(require_team)):
 @app.get("/api/rosters")
 def rosters(session: dict = Depends(require_team)):
     _ensure_pin_changed(session)
-    return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.MAX_ROSA}
+    return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.max_roster()}
 
 
 @app.get("/api/free-agents")
@@ -768,7 +832,7 @@ def spectator_history(_: dict = Depends(require_spectator)):
 
 @app.get("/api/spectator/rosters")
 def spectator_rosters(_: dict = Depends(require_spectator)):
-    return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.MAX_ROSA}
+    return {"teams": db.get_public_teams(), "rosters": db.get_all_rosters(), "max_roster": db.max_roster()}
 
 
 @app.get("/api/spectator/free-agents")
@@ -929,7 +993,7 @@ async def _arm_auto_random():
     if not ready:
         await broadcast_state()
         return False
-    _auto_random_deadline = time.time() + AUTO_RANDOM_DELAY
+    _auto_random_deadline = time.time() + db.auto_random_delay()
 
     async def runner():
         global _auto_random_task, _auto_random_deadline
@@ -991,21 +1055,94 @@ def _start_timer():
     _timer_task = asyncio.create_task(waiter())
 
 
+def _public_tocca_result(result: dict):
+    """Nasconde il vincitore finche' la TOCCA non e' terminata."""
+    if not result or not result.get("tocca_pending"):
+        return result
+    public = dict(result)
+    public.pop("team", None)
+    public.pop("needs_release", None)
+    return public
+
+
+def _cancel_tocca_task():
+    global _tocca_task
+    task = _tocca_task
+    _tocca_task = None
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+def _tocca_remaining_seconds(result: dict | None = None):
+    r = result or auction.last_result or {}
+    if not r.get("tocca") or not r.get("tocca_pending"):
+        return 0.0
+    started_ms = float(r.get("tocca_reveal_started_at_ms") or 0)
+    duration_ms = float(r.get("tocca_reveal_duration_ms") or auction_module.TOCCA_REVEAL_MS)
+    if started_ms <= 0:
+        return 0.0
+    return max(0.0, (started_ms + duration_ms) / 1000 - time.time())
+
+
+def _schedule_tocca_finalize(result: dict | None = None):
+    """Conclude la TOCCA lato server allo scadere del reveal globale."""
+    global _tocca_task
+    _cancel_tocca_task()
+    expected = dict(result or auction.last_result or {})
+    reveal_id = expected.get("tocca_reveal_id")
+    if auction.mode != "tocca" or not reveal_id:
+        return False
+
+    async def runner():
+        global _tocca_task
+        try:
+            remaining = _tocca_remaining_seconds(expected)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            async with AUCTION_LOCK:
+                current = auction.last_result or {}
+                if auction.mode != "tocca" or current.get("tocca_reveal_id") != reveal_id:
+                    return
+                final = auction.finalize_tocca()
+                if not final.get("needs_release"):
+                    backup_if_real(f"acquisto {final.get('player_name', '')}")
+            # Solo ora il nome del vincitore viene trasmesso a tutti.
+            await manager.broadcast_result(final)
+            await broadcast_state()
+            if not final.get("needs_release"):
+                await _arm_auto_random()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"[tocca] finalizzazione non riuscita: {exc}")
+        finally:
+            if _tocca_task is asyncio.current_task():
+                _tocca_task = None
+
+    _tocca_task = asyncio.create_task(runner())
+    return True
+
+
 async def _close_and_broadcast(from_timer: bool = False):
     result = auction.close()
+    tocca_pending = bool(result.get("tocca_pending"))
     if result.get("type") == "tiebreak":
         _start_timer()
     else:
         _stop_timer()
-        if result.get("type") == "assigned" and not result.get("needs_release"):
-            backup_if_real(f"acquisto {result.get('player_name', '')}")
-        elif result.get("type") == "no_offers":
-            backup_if_real("giocatore passato")
-    await manager.broadcast_result(result)
+        if not tocca_pending:
+            if result.get("type") == "assigned" and not result.get("needs_release"):
+                backup_if_real(f"acquisto {result.get('player_name', '')}")
+            elif result.get("type") == "no_offers":
+                backup_if_real("giocatore passato")
+    await manager.broadcast_result(_public_tocca_result(result))
     await broadcast_state()
     if result.get("type") == "tiebreak":
         asyncio.create_task(_push_tiebreak(result))
-    if result.get("type") in ("assigned", "no_offers") and not result.get("needs_release"):
+    elif tocca_pending:
+        # Nessun altro passaggio dell'asta puo' partire prima della fine della TOCCA.
+        _schedule_tocca_finalize(result)
+    elif result.get("type") in ("assigned", "no_offers") and not result.get("needs_release"):
         await _arm_auto_random()
     return result
 
@@ -1175,6 +1312,7 @@ async def add_time(body: AddTimeBody, _: dict = Depends(require_auction_manager)
 
 @app.post("/api/auction/admin/cancel")
 async def cancel_auction(_: dict = Depends(require_auction_manager)):
+    _cancel_tocca_task()
     _cancel_auto_random()
     async with AUCTION_LOCK:
         try:
@@ -1345,6 +1483,10 @@ async def startup_resume_timer():
     global _presence_task
     if auction.mode in ("bidding", "tiebreak") and not auction.paused:
         _start_timer()
+    elif auction.mode == "tocca":
+        # Se Railway riavvia il container durante il reveal, riprende dalla
+        # scadenza persistita e non perde l'assegnazione.
+        _schedule_tocca_finalize(auction.last_result)
 
     async def presence_loop():
         try:
@@ -1361,6 +1503,7 @@ async def startup_resume_timer():
 async def shutdown_tasks():
     global _presence_task
     _stop_timer()
+    _cancel_tocca_task()
     _cancel_auto_random()
     if _presence_task and not _presence_task.done():
         _presence_task.cancel()

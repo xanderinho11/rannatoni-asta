@@ -1,7 +1,7 @@
 {
   "name":"Rannatoni",
   "short_name":"Rannatoni",
-  "description":"Asta di riparazione della lega Rannatoni",
+  "description":"Piattaforma d’asta Fantacalcio Rannatoni",
   "start_url":"/",
   "scope":"/",
   "display":"standalone",

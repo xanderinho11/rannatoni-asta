@@ -10,7 +10,7 @@ import time
 
 import db
 
-DURATA_ASTA = 60
+TOCCA_REVEAL_MS = 5200
 
 
 class AuctionError(Exception):
@@ -23,7 +23,7 @@ class Auction:
 
     def reset(self, persist: bool = True, keep_last_result: bool = False):
         last = getattr(self, "last_result", None) if keep_last_result else None
-        self.mode = "idle"               # idle | bidding | tiebreak | release
+        self.mode = "idle"               # idle | bidding | tiebreak | tocca | release
         self.current_pid = None
         self.offers: dict[str, int] = {}
         self.eligible_teams: set[str] = set()
@@ -43,6 +43,8 @@ class Auction:
             print(f"[auction] salvataggio stato non riuscito: {exc}")
 
     def serialize(self) -> dict:
+        # Lo stato persistito deve conservare anche il vincitore privato della
+        # TOCCA: viene filtrato esclusivamente nello snapshot inviato ai client.
         return {
             "mode": self.mode,
             "current_pid": self.current_pid,
@@ -110,7 +112,7 @@ class Auction:
         self.offers = {}
         self.eligible_teams = attive
         self.tiebreak_value = None
-        self.deadline = time.time() + DURATA_ASTA
+        self.deadline = time.time() + db.bid_duration()
         self.paused = False
         self.paused_remaining = None
         self.round_history = []
@@ -146,12 +148,26 @@ class Auction:
         squadra = db.get_team(team)
         if not squadra:
             raise AuctionError("Squadra non riconosciuta.")
-        massimo = int(squadra["budget"]) + sum(int(g["price"]) for g in db.get_roster(team))
-        if amount > massimo:
-            raise AuctionError(
-                f"Offerta troppo alta: massimo {massimo} "
-                f"(residuo {squadra['budget']} + svincoli possibili)."
-            )
+        roster = db.get_roster(team)
+        rules = db.get_league_settings()
+        if rules["auction_mode"] == "zero":
+            if len(roster) >= int(rules["max_roster"]):
+                raise AuctionError("La tua rosa e' completa: non puoi fare altre offerte.")
+            player = db.get_player(self.current_pid)
+            if player and "P" in (player.get("roles") or []):
+                keepers = sum(1 for g in roster if "P" in (g.get("roles") or []))
+                if keepers >= int(rules["max_goalkeepers"]):
+                    raise AuctionError(f"Hai gia' il massimo di {rules['max_goalkeepers']} portieri.")
+            massimo = int(squadra["budget"])
+            if amount > massimo:
+                raise AuctionError(f"Offerta troppo alta: hai {massimo} crediti disponibili.")
+        else:
+            massimo = int(squadra["budget"]) + sum(int(g["price"]) for g in roster)
+            if amount > massimo:
+                raise AuctionError(
+                    f"Offerta troppo alta: massimo {massimo} "
+                    f"(residuo {squadra['budget']} + svincoli possibili)."
+                )
         release_floor = db.get_release_floor(team, self.current_pid)
         if release_floor and amount < int(release_floor):
             raise AuctionError(
@@ -266,7 +282,7 @@ class Auction:
             self.eligible_teams = set(winners)
             self.tiebreak_value = maximum
             self.offers = {}
-            self.deadline = time.time() + DURATA_ASTA
+            self.deadline = time.time() + db.bid_duration()
             self.paused = False
             self.paused_remaining = None
             result = {
@@ -305,19 +321,49 @@ class Auction:
         }
         if tocca:
             result["random_candidates"] = sorted(str(t) for t in reveal.keys())
+            result["tocca_reveal_id"] = f"{pid}-{time.time_ns()}"
+            result["tocca_reveal_started_at_ms"] = int(time.time() * 1000)
+            result["tocca_reveal_duration_ms"] = TOCCA_REVEAL_MS
+            result["tocca_pending"] = True
 
+        rules = db.get_league_settings()
+        max_roster = int(rules["max_roster"])
+        max_goalkeepers = int(rules["max_goalkeepers"])
         deficit = max(0, int(price) - int(squadra["budget"]))
-        slots_needed = max(0, len(roster) + 1 - db.MAX_ROSA)
+        slots_needed = max(0, len(roster) + 1 - max_roster)
         keeper_count = sum(1 for g in roster if "P" in (g.get("roles") or []))
         buying_keeper = bool(player and "P" in (player.get("roles") or []))
-        keeper_release_needed = max(0, keeper_count + (1 if buying_keeper else 0) - db.MAX_GOALKEEPERS)
-        if deficit > 0 or slots_needed > 0 or keeper_release_needed > 0:
+        keeper_release_needed = max(0, keeper_count + (1 if buying_keeper else 0) - max_goalkeepers)
+        if rules["auction_mode"] == "zero":
+            # Nell'asta iniziale non esiste una rosa pregressa da svincolare:
+            # i limiti vengono bloccati gia' in fase di offerta.
+            if deficit > 0:
+                raise AuctionError("Crediti insufficienti per completare l'acquisto.")
+            if slots_needed > 0:
+                raise AuctionError("La rosa e' gia' al numero massimo di giocatori.")
+            if keeper_release_needed > 0:
+                raise AuctionError(f"Puoi avere al massimo {max_goalkeepers} portieri.")
+        elif deficit > 0 or slots_needed > 0 or keeper_release_needed > 0:
             result["needs_release"] = {
                 "team": team, "pid": pid, "price": int(price), "deficit": deficit,
                 "slots_needed": slots_needed, "keeper_release_needed": keeper_release_needed,
                 "budget": int(squadra["budget"]), "roster_size": len(roster),
-                "max_roster": db.MAX_ROSA, "max_goalkeepers": db.MAX_GOALKEEPERS,
+                "max_roster": max_roster, "max_goalkeepers": max_goalkeepers,
             }
+
+        # La TOCCA e' una vera fase intermedia: il vincitore e' gia' deciso dal
+        # server, ma finche' il reveal non termina non viene assegnato il giocatore,
+        # non parte uno svincolo e il nome del vincitore non viene esposto ai client.
+        if tocca:
+            self.mode = "tocca"
+            self.deadline = time.time() + TOCCA_REVEAL_MS / 1000
+            self.paused = False
+            self.paused_remaining = None
+            self.last_result = result
+            self._persist()
+            return result
+
+        if result.get("needs_release"):
             self.mode = "release"
             self.deadline = None
             self.paused = False
@@ -330,6 +376,39 @@ class Auction:
         db.log_event(
             "assigned", pid, team, int(price), reveal=reveal,
             rounds=self.round_history, released=[], tocca=tocca,
+        )
+        self.reset(persist=False)
+        self.last_result = result
+        self._persist()
+        return result
+
+    def finalize_tocca(self):
+        """Conclude il reveal della TOCCA e rende effettivo il risultato.
+
+        Il vincitore viene deciso in ``_assign`` ma resta privato durante la fase
+        ``tocca``. Solo qui si passa agli eventuali svincoli oppure si registra
+        definitivamente l'acquisto.
+        """
+        if self.mode != "tocca" or not self.last_result or not self.last_result.get("tocca"):
+            raise AuctionError("Nessuna TOCCA da concludere.")
+
+        result = dict(self.last_result)
+        result["tocca_pending"] = False
+        self.deadline = None
+        self.paused = False
+        self.paused_remaining = None
+
+        if result.get("needs_release"):
+            self.mode = "release"
+            self.last_result = result
+            self._persist()
+            return result
+
+        team, pid, price = result.get("team"), result.get("pid"), result.get("price")
+        db.assign_player(team, pid, int(price), charge_budget=True)
+        db.log_event(
+            "assigned", pid, team, int(price), reveal=result.get("reveal", {}),
+            rounds=result.get("rounds", []), released=[], tocca=True,
         )
         self.reset(persist=False)
         self.last_result = result
@@ -402,6 +481,14 @@ class Auction:
             if viewer_team == info.get("team"):
                 release_private = dict(info)
 
+        public_last_result = self.last_result
+        if self.mode == "tocca" and self.last_result:
+            # Durante la TOCCA tutti vedono lo stesso evento, ma nessuno riceve
+            # il nome del vincitore o le informazioni sugli eventuali svincoli.
+            public_last_result = dict(self.last_result)
+            public_last_result.pop("team", None)
+            public_last_result.pop("needs_release", None)
+
         return {
             "mode": self.mode,
             "current_player": player,
@@ -411,14 +498,14 @@ class Auction:
             "all_submitted": self.all_submitted() if active else False,
             "tiebreak_value": self.tiebreak_value,
             "seconds_left": self.seconds_left(),
-            "duration": DURATA_ASTA,
+            "duration": db.bid_duration(),
             "paused": self.paused,
             "own_response": own,
             "own_min_bid": own_min_bid,
             "own_release_floor": int(own_release_floor or 0),
             "release_public": release_public,
             "release_info": release_private,
-            "last_result": self.last_result,
+            "last_result": public_last_result,
         }
 
 

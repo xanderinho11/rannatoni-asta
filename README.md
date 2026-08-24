@@ -1,6 +1,6 @@
-# Rannatoni v14
+# Rannatoni
 
-Web-app/PWA per l'**asta di riparazione** della lega Rannatoni, con FastAPI, WebSocket e SQLite.
+Web-app/PWA per aste Fantacalcio, con modalità **asta di riparazione** e **asta da zero**, FastAPI, WebSocket e SQLite.
 
 ## Avvio locale
 
@@ -13,12 +13,12 @@ In locale la password Super Admin predefinita è `asta2026`. Su Railway va impos
 
 ## Preparazione asta
 
-1. Carica **Catalogo**.
-2. Facoltativo: carica **Statistiche** FantaLab/Strategia (CSV/XLSX).
-3. Carica **Rose**.
-4. Inserisci gli **username** delle squadre.
-5. Premi **Genera PIN per tutti**: vengono creati PIN temporanei casuali di 4 cifre.
-6. Imposta residui e seleziona la squadra che **gestisce l'asta**.
+1. Apri **⚙️ Impostazioni lega** e scegli **Riparazione** oppure **Da zero**.
+2. Imposta posti rosa, portieri min/max, giocatori di movimento minimi, durata busta e pausa RANDOM.
+3. In **Asta da zero** imposta anche numero squadre e crediti iniziali: Rannatoni prepara automaticamente le squadre vuote.
+4. Carica **Catalogo** e, facoltativamente, le **Statistiche** FantaLab/Strategia (CSV/XLSX).
+5. Solo in **Riparazione** carica le **Rose** e imposta i residui delle singole squadre.
+6. Configura nome squadra (da zero), username, PIN temporanei e Gestore.
 7. Salva la configurazione e distribuisci username + PIN temporaneo.
 8. Il Super Admin preme **Avvia asta**.
 
@@ -36,13 +36,13 @@ Prima dell'avvio ufficiale viene mostrata la **Lobby** con chi ha già effettuat
 
 ## Asta
 
-- Timer standard: 60 secondi.
+- La durata massima della busta è configurabile dal Super Admin (60 secondi di default).
 - Le buste sono segrete fino all'apertura.
 - Quando tutti gli aventi diritto hanno risposto, l'apertura è automatica.
 - Il Gestore può forzare l'apertura; i mancanti vengono considerati PASSO.
 - Le offerte possono essere modificate fino all'apertura.
 - Il valore digitato nel campo offerta resta preservato durante gli aggiornamenti realtime.
-- RANDOM automatico: dopo un'asta conclusa può partire la successiva dopo 10 secondi.
+- La pausa RANDOM tra un'asta e la successiva è configurabile (10 secondi di default).
 
 ## Svincoli
 
@@ -96,7 +96,7 @@ Le altre statistiche possono restare importate nel database, ma non vengono most
 
 - Tap esclusivamente sulla foto del giocatore: scheda statistiche.
 - Tap sulla card/risultato: dettaglio asta con offerte e svincoli.
-- Le assegnazioni casuali dopo uno spareggio pari usano un reveal di circa 4–5 secondi; il vincitore è già deciso dal backend e l’animazione non causa refresh o salti di layout.
+- Le assegnazioni casuali dopo uno spareggio pari usano la **TOCCA** globale: tutti vedono la stessa sequenza e il vincitore resta nascosto fino al reveal finale.
 
 ## Backup e reset
 
@@ -117,6 +117,10 @@ La password `ADMIN_PASSWORD`, il codice dell'app e il volume Railway non vengono
 Il progetto include `Dockerfile` e `railway.toml`. In produzione il volume persistente resta montato su `/app/data` e la porta pubblica usata dal progetto è 8080.
 
 
-## Assegnazione casuale
+## Assegnazione casuale · TOCCA
 
-Quando uno spareggio resta pari perché nessuno alza la propria offerta, il backend decide subito il vincitore tra le sole squadre ancora in parità. Il frontend mostra poi un reveal di circa 4–5 secondi con alternanza dei nomi e rallentamento progressivo. La card ha altezza fissa e gli aggiornamenti realtime dello stesso risultato non la ricreano, così durante l’animazione non cambiano scroll, input o layout.
+Quando uno spareggio resta pari perché nessuno alza la propria offerta, il backend decide subito il vincitore ma **non lo espone ancora ai client**. Parte una fase globale `tocca` di circa 5,2 secondi, visibile a tutti i Rannatoni e agli spettatori che stanno seguendo la schermata Asta:
+
+`Nessuno vuole alzare… → Parte la TOCCA… → P' me… → Vers' te'… → UEEEE! → vincitore`
+
+Durante la TOCCA il giocatore non viene ancora aggiunto alla rosa, lo Storico non viene aggiornato e non possono partire eventuali svincoli. Solo alla fine il server rende pubblico il vincitore; se servono svincoli, la relativa schermata compare dopo un breve momento in cui resta visibile il risultato. La card ha altezza fissa e gli aggiornamenti realtime non devono causare refresh, salti di layout o perdita dello scroll.

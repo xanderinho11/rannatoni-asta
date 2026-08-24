@@ -17,7 +17,7 @@ if not exist "venv\Scripts\activate.bat" (
 
 echo.
 echo ============================================================
-echo   RANNATONI - ASTA DI RIPARAZIONE - SERVER LOCALE
+echo   RANNATONI - ASTA FANTACALCIO - SERVER LOCALE
 echo.
 echo   Sul PC:
 echo     http://localhost:8000
