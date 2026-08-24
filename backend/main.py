@@ -146,6 +146,7 @@ class ConnectionManager:
     def __init__(self):
         self.connections: dict[WebSocket, dict] = {}
         self.last_presence: dict[str, dict] = {}
+        self.send_locks: dict[WebSocket, asyncio.Lock] = {}
 
     async def connect(self, ws: WebSocket, session: dict):
         await ws.accept()
@@ -156,6 +157,7 @@ class ConnectionManager:
             "visibility": "visible",
             "last_seen": time.time(),
         }
+        self.send_locks[ws] = asyncio.Lock()
         if team:
             # v10: il login/una sessione attiva equivale a essere entrati nel mercato.
             # Non si torna "non pronti" chiudendo l'app o andando offline: si esce
@@ -182,6 +184,7 @@ class ConnectionManager:
 
     def disconnect(self, ws: WebSocket):
         info = self.connections.pop(ws, None)
+        self.send_locks.pop(ws, None)
         if info and info.get("team"):
             self.last_presence[info["team"]] = {
                 "visibility": info.get("visibility", "hidden"),
@@ -208,38 +211,59 @@ class ConnectionManager:
         team = info.get("team")
         await ws.send_json({"type": "state", "data": build_state(team)})
 
-    async def broadcast_state(self):
-        dead = []
-        for ws in list(self.connections):
+    async def _send_with_timeout(self, ws: WebSocket, payload: dict, timeout: float = 3.0):
+        # Un socket mobile rimasto "zombie" non deve bloccare il realtime degli
+        # altri partecipanti. Railway/TCP può impiegare parecchi secondi prima di
+        # segnalare una connessione morta: limitiamo ogni invio e trasmettiamo
+        # contemporaneamente a tutti i client. Il lock evita due send concorrenti
+        # sullo stesso socket (es. broadcast + pong).
+        lock = self.send_locks.get(ws)
+        if lock is None:
+            raise RuntimeError("WebSocket non più connesso")
+
+        async def do_send():
+            async with lock:
+                await ws.send_json(payload)
+
+        await asyncio.wait_for(do_send(), timeout=timeout)
+
+    async def _broadcast_payloads(self, items):
+        async def deliver(ws, payload):
             try:
-                await self.send_state(ws)
+                await self._send_with_timeout(ws, payload)
+                return None
             except Exception:
-                dead.append(ws)
+                return ws
+
+        tasks = [deliver(ws, payload) for ws, payload in items]
+        if not tasks:
+            return
+        dead = await asyncio.gather(*tasks)
         for ws in dead:
-            self.disconnect(ws)
+            if ws is not None:
+                self.disconnect(ws)
+
+    async def broadcast_state(self):
+        items = []
+        for ws in list(self.connections):
+            info = self.connections.get(ws) or {}
+            team = info.get("team")
+            items.append((ws, {"type": "state", "data": build_state(team)}))
+        await self._broadcast_payloads(items)
 
     async def broadcast_result(self, result: dict):
-        dead = []
-        for ws in list(self.connections):
-            try:
-                await ws.send_json({"type": "result", "data": result})
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+        await self._broadcast_payloads([
+            (ws, {"type": "result", "data": result})
+            for ws in list(self.connections)
+        ])
 
     async def broadcast_team_event(self, event_type: str, data: dict):
         """Evento realtime riservato ai Rannatoni autenticati (non spettatori)."""
-        dead = []
-        for ws, info in list(self.connections.items()):
-            if info.get("role") != "team":
-                continue
-            try:
-                await ws.send_json({"type": event_type, "data": data})
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+        await self._broadcast_payloads([
+            (ws, {"type": event_type, "data": data})
+            for ws, info in list(self.connections.items())
+            if info.get("role") == "team"
+        ])
 
 
 manager = ConnectionManager()
@@ -249,6 +273,21 @@ _presence_task = None
 _tocca_task = None
 _auto_random_task = None
 _auto_random_deadline = None
+# Revisione leggera del realtime: i client mobili la controllano ogni secondo
+# come rete di sicurezza quando il WebSocket riceve i frame in ritardo.
+STATE_VERSION = int(time.time() * 1000)
+
+
+def _bump_state_version():
+    global STATE_VERSION
+    STATE_VERSION += 1
+    return STATE_VERSION
+
+
+def _no_store(response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
 
 
 def simulation_active():
@@ -303,6 +342,7 @@ def _teams_with_presence():
 
 def build_state(viewer_team: str | None = None):
     state = auction.snapshot(viewer_team)
+    state["state_version"] = STATE_VERSION
     state["simulation"] = simulation_active()
     state["server_now_ms"] = int(time.time() * 1000)
     state["auction_started"] = auction_started()
@@ -350,6 +390,7 @@ def build_state(viewer_team: str | None = None):
 
 
 async def broadcast_state():
+    _bump_state_version()
     await manager.broadcast_state()
 
 
@@ -836,8 +877,15 @@ async def restore_backup(body: RestoreBody, _: dict = Depends(require_superadmin
 
 
 # ========= DATI PARTECIPANTE =========
+@app.get("/api/state/version")
+def get_state_version(response: Response, _: dict = Depends(require_team)):
+    _no_store(response)
+    return {"version": STATE_VERSION}
+
+
 @app.get("/api/state")
-def get_state(session: dict = Depends(require_team)):
+def get_state(response: Response, session: dict = Depends(require_team)):
+    _no_store(response)
     return build_state(session["team"])
 
 
@@ -926,8 +974,15 @@ async def change_pin(body: ChangePinBody, session: dict = Depends(require_team))
     return {"ok": True}
 
 
+@app.get("/api/spectator/state/version")
+def spectator_state_version(response: Response, _: dict = Depends(require_spectator)):
+    _no_store(response)
+    return {"version": STATE_VERSION}
+
+
 @app.get("/api/spectator/state")
-def spectator_state(_: dict = Depends(require_spectator)):
+def spectator_state(response: Response, _: dict = Depends(require_spectator)):
+    _no_store(response)
     return build_state(None)
 
 
@@ -1583,6 +1638,17 @@ async def websocket_endpoint(ws: WebSocket, token: str):
                 msg = {"type": "ping", "visibility": "visible"}
             if msg.get("type") in ("presence", "ping"):
                 changed = manager.touch(ws, msg.get("visibility", "visible"))
+                if msg.get("type") == "ping":
+                    # Risposta immediata: la PWA usa il pong per distinguere un
+                    # WebSocket davvero vivo da un socket mobile rimasto OPEN
+                    # ma sospeso dal sistema operativo.
+                    try:
+                        await manager._send_with_timeout(ws, {
+                            "type": "pong",
+                            "server_now_ms": int(time.time() * 1000),
+                        }, timeout=2.0)
+                    except Exception:
+                        break
                 if changed:
                     await broadcast_state()
     except WebSocketDisconnect:
