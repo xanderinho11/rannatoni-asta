@@ -9,11 +9,11 @@ ALLOWED_MANTRA_ROLES = {"P", "Ds", "Dc", "Dd", "E", "M", "C", "W", "T", "A", "Pc
 
 
 STAT_HEADER_ALIASES = {
-    "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "qt", "quo"},
+    "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "quot.", "qt", "quo"},
     "fvm": {"fvm", "fanta valore di mercato", "fantavalore", "fanta valore"},
     "fantamedia": {"fm", "fmv", "fantamedia", "fanta media", "fanta media voto"},
     "media_voto": {"mv", "media voto", "media voti", "media"},
-    "presenze": {"pv", "presenze", "presenza"},
+    "presenze": {"pv", "pgv", "pgv.", "presenze", "presenza"},
     "gol": {"gf", "gol", "goal", "reti"},
     "assist": {"ass", "assist"},
     "ammonizioni": {"amm", "ammonizioni"},
@@ -24,6 +24,12 @@ STAT_HEADER_ALIASES = {
     "gol_subiti": {"gs", "gol subiti", "reti subite"},
     "rigori_parati": {"rp", "rigori parati"},
 }
+
+# Queste sono le metriche che Rannatoni usa davvero nell'interfaccia. Il file
+# puo' contenere molte altre colonne numeriche, ma non le importiamo solo perche'
+# esistono: in questo modo un listone Euroleghe con FVM/1000, Under, ecc. viene
+# riconosciuto correttamente senza trasformare ogni numero in una statistica.
+SUPPORTED_STAT_KEYS = ("media_voto", "fantamedia", "quotazione", "presenze")
 
 STAT_LABELS = {
     "quotazione": "Quotazione",
@@ -295,8 +301,8 @@ IDENTITY_HEADERS = {
 }
 
 _NAME_ALIASES = {"nome", "nome completo", "calciatore", "giocatore"}
-_CLUB_ALIASES = {"squadra", "team", "club"}
-_ID_ALIASES = {"id", "id giocatore", "id calciatore", "codice", "cod"}
+_CLUB_ALIASES = {"squadra", "team", "club", "sq", "sq."}
+_ID_ALIASES = {"#", "id", "id giocatore", "id calciatore", "codice", "cod"}
 
 
 def _safe_stat_key(label: str):
@@ -330,7 +336,10 @@ def parse_stats_rows(rows: list[list[str]]):
     - ID giocatore, se il file lo contiene;
     - Nome breve + Team, come nei file Strategia/FantaLab.
 
-    Riconosce le metriche note e conserva anche colonne numeriche aggiuntive.
+    Riconosce automaticamente solo le metriche supportate e le considera
+    disponibili soltanto se nel file hanno almeno un valore significativo.
+    Una colonna presente ma interamente a zero (tipico dei listoni Euroleghe
+    prima dell'inizio del campionato) non viene quindi mostrata come statistica.
     """
     result = {"records": [], "errors": [], "labels": {}}
     if not rows:
@@ -343,44 +352,22 @@ def parse_stats_rows(rows: list[list[str]]):
         return result
 
     header = list(rows[header_idx])
-    known = _stat_columns(header)
+    known = {k: v for k, v in _stat_columns(header).items() if k in SUPPORTED_STAT_KEYS}
     col_to_key = {}
     for key, idx in known.items():
+        values = []
+        for row in rows[header_idx + 1:]:
+            if idx < len(row):
+                value = _parse_stat_number(row[idx])
+                if value is not None:
+                    values.append(value)
+        # Una metrica tutta a zero non aggiunge informazione e non deve generare
+        # filtri/popup fasulli. Quando almeno un valore e' significativo, invece,
+        # conserviamo anche gli eventuali zeri degli altri giocatori.
+        if not values or not any(abs(float(v)) > 1e-12 for v in values):
+            continue
         col_to_key[idx] = key
         result["labels"][key] = STAT_LABELS.get(key, str(header[idx]).strip() or key)
-    used = set(col_to_key.values())
-
-    # Colonne che non sono statistiche anche se numeriche nel file Strategia.
-    ignored_dynamic = {
-        "prezzo", "fascia", "obiett", "obiett.", "commento",
-        "nota 1", "nota 2", "nota 3", "nota 4", "nota 5",
-        "ruolo", "ruoli", "nome", "nome completo", "calciatore", "giocatore",
-        "squadra", "team", "club", "id", "id giocatore", "id calciatore", "codice", "cod",
-    }
-
-    # Colonne numeriche sconosciute: import dinamico (es. Affidabilita',
-    # Integrita', FMV Exp., Pt. Tit., Minuti, Pt. Inf., Rig. Sbagliati).
-    for idx, label in enumerate(header):
-        norm_label = _norm_header(label)
-        if idx in {id_idx, name_idx, club_idx} or norm_label in ignored_dynamic or idx in col_to_key or not str(label).strip():
-            continue
-        vals = []
-        for row in rows[header_idx + 1:header_idx + 30]:
-            if idx < len(row):
-                v = _parse_stat_number(row[idx])
-                if v is not None:
-                    vals.append(v)
-        if not vals:
-            continue
-        key = _safe_stat_key(label)
-        base = key
-        n = 2
-        while key in used:
-            key = f"{base}_{n}"
-            n += 1
-        used.add(key)
-        col_to_key[idx] = key
-        result["labels"][key] = str(label).strip()
 
     # I multiruolo possono comparire su piu' fogli FantaLab. Qui deduplichiamo
     # l'identita' mantenendo/accorpando tutte le metriche disponibili.

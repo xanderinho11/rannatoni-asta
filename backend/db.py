@@ -68,7 +68,9 @@ def init_db():
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS teams (
+                uid TEXT NOT NULL UNIQUE,
                 name TEXT PRIMARY KEY,
+                name_pending INTEGER NOT NULL DEFAULT 0,
                 username TEXT UNIQUE,
                 pin TEXT NOT NULL DEFAULT '',
                 pin_hash TEXT NOT NULL DEFAULT '',
@@ -153,6 +155,10 @@ def init_db():
 
         # Migrazioni leggere da versioni MVP precedenti.
         team_cols = _table_columns(conn, "teams")
+        if "uid" not in team_cols:
+            conn.execute("ALTER TABLE teams ADD COLUMN uid TEXT NOT NULL DEFAULT ''")
+        if "name_pending" not in team_cols:
+            conn.execute("ALTER TABLE teams ADD COLUMN name_pending INTEGER NOT NULL DEFAULT 0")
         if "username" not in team_cols:
             conn.execute("ALTER TABLE teams ADD COLUMN username TEXT")
         if "pin" not in team_cols:
@@ -169,6 +175,14 @@ def init_db():
             conn.execute("ALTER TABLE teams ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
         if "market_finished" not in team_cols:
             conn.execute("ALTER TABLE teams ADD COLUMN market_finished INTEGER NOT NULL DEFAULT 0")
+
+        # Dalla v18 ogni squadra ha anche un identificatore interno stabile. Il
+        # nome puo' essere scelto al primo accesso nell'asta da zero senza
+        # cambiare l'identita' amministrativa dell'account.
+        for row in conn.execute("SELECT rowid,uid FROM teams").fetchall():
+            if not str(row["uid"] or "").strip():
+                conn.execute("UPDATE teams SET uid=? WHERE rowid=?", (secrets.token_hex(10), row["rowid"]))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_uid ON teams(uid)")
 
         player_cols = _table_columns(conn, "players")
         if "stats_json" not in player_cols:
@@ -279,9 +293,9 @@ def _clear_setup_conn(conn, clear_teams: bool):
 def apply_league_settings(values: dict) -> dict:
     """Salva le regole e prepara il setup coerente con la modalita' scelta.
 
-    Il catalogo/statistiche restano intatti. Il setup squadre/rose viene ricreato
-    solo quando cambia la modalita' oppure, in asta da zero, cambia il numero di
-    squadre.
+    Il catalogo/statistiche restano intatti. Nell'asta da zero il numero di
+    squadre e' un limite/obiettivo: gli account vengono creati uno alla volta dal
+    Super Admin e non vengono piu' generati automaticamente.
     """
     cfg = validate_league_settings(values)
     old = get_league_settings()
@@ -293,23 +307,22 @@ def apply_league_settings(values: dict) -> dict:
         roster_count = int(conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0] or 0)
 
         if cfg["auction_mode"] == "zero":
-            need_rebuild = mode_changed or roster_count > 0 or current_team_count != cfg["team_count"]
-            if need_rebuild:
+            if mode_changed or roster_count > 0:
                 _clear_setup_conn(conn, clear_teams=True)
-                for idx in range(1, cfg["team_count"] + 1):
-                    conn.execute(
-                        "INSERT INTO teams(name,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished) "
-                        "VALUES (?,NULL,'','',1,?,0,0,0)",
-                        (f"Squadra {idx}", cfg["initial_budget"]),
-                    )
+                current_team_count = 0
                 rebuilt = True
-            else:
-                # Prima dell'avvio tutte le squadre di un'asta da zero devono
-                # partire dallo stesso monte crediti configurato.
-                conn.execute(
-                    "UPDATE teams SET budget=?, ready=0, market_finished=0",
-                    (cfg["initial_budget"],),
+            elif cfg["team_count"] < current_team_count:
+                raise ValueError(
+                    f"Hai gia' creato {current_team_count} squadre. Elimina prima "
+                    f"{current_team_count - cfg['team_count']} squadra/e per impostare il limite a {cfg['team_count']}."
                 )
+
+            # Prima dell'avvio tutte le squadre gia' create in un'asta da zero
+            # partono dallo stesso monte crediti configurato.
+            conn.execute(
+                "UPDATE teams SET budget=?, ready=0, market_finished=0",
+                (cfg["initial_budget"],),
+            )
             total_players = int(conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] or 0)
             conn.execute(
                 "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
@@ -328,7 +341,7 @@ def apply_league_settings(values: dict) -> dict:
                 (_LEAGUE_SETTING_KEYS[key], str(value)),
             )
         conn.commit()
-    return {"settings": cfg, "setup_rebuilt": rebuilt}
+    return {"settings": cfg, "setup_rebuilt": rebuilt, "teams_created": current_team_count}
 
 
 def auction_mode() -> str:
@@ -403,14 +416,18 @@ def _migrate_plaintext_pins(conn):
 
 
 # ---------- TEAMS ----------
+def _new_team_uid() -> str:
+    return secrets.token_hex(10)
+
+
 def ensure_team(name: str, budget: int = 0) -> bool:
     with get_conn() as conn:
         row = conn.execute("SELECT 1 FROM teams WHERE name = ?", (name,)).fetchone()
         if row:
             return False
         conn.execute(
-            "INSERT INTO teams (name, username, pin, pin_hash, pin_must_change, budget, is_admin, ready, market_finished) VALUES (?, NULL, '', '', 1, ?, 0, 0, 0)",
-            (name, budget),
+            "INSERT INTO teams (uid,name,name_pending,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished) VALUES (?,?,0,NULL,'','',1,?,0,0,0)",
+            (_new_team_uid(), name, budget),
         )
         conn.commit()
         return True
@@ -427,7 +444,7 @@ def get_all_teams(include_secrets: bool = True):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT name, username, budget, is_admin, ready, market_finished,
+            SELECT uid, name, name_pending, username, budget, is_admin, ready, market_finished,
                    CASE WHEN pin_hash<>'' THEN 1 ELSE 0 END AS pin_configured,
                    pin_must_change
             FROM teams ORDER BY name COLLATE NOCASE
@@ -440,13 +457,172 @@ def get_public_teams():
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT t.name, t.budget, t.is_admin, t.ready, t.market_finished, COUNT(r.pid) AS roster_size
+            SELECT t.uid, t.name, t.name_pending, t.username, t.budget, t.is_admin, t.ready, t.market_finished, COUNT(r.pid) AS roster_size
             FROM teams t LEFT JOIN roster r ON r.team = t.name
-            GROUP BY t.name, t.budget, t.is_admin, t.ready, t.market_finished
+            GROUP BY t.uid, t.name, t.name_pending, t.username, t.budget, t.is_admin, t.ready, t.market_finished
             ORDER BY t.name COLLATE NOCASE
             """
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def create_zero_team(username: str, temporary_pin: str, name: str = "") -> dict:
+    """Crea un singolo account nell'asta da zero rispettando il limite lega."""
+    rules = get_league_settings()
+    if rules["auction_mode"] != "zero":
+        raise ValueError("La creazione manuale delle squadre e' disponibile solo nell'asta da zero.")
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("Inserisci uno username.")
+    temporary_pin = _validate_pin_format(temporary_pin)
+    requested_name = str(name or "").strip()
+
+    with get_conn() as conn:
+        count = int(conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0] or 0)
+        if count >= int(rules["team_count"]):
+            raise ValueError(f"Hai gia' raggiunto il limite di {rules['team_count']} squadre.")
+        if conn.execute("SELECT 1 FROM teams WHERE lower(username)=lower(?)", (username,)).fetchone():
+            raise ValueError("Questo username e' gia' utilizzato.")
+        if requested_name and conn.execute("SELECT 1 FROM teams WHERE lower(name)=lower(?)", (requested_name,)).fetchone():
+            raise ValueError("Questo nome squadra e' gia' utilizzato.")
+
+        uid = _new_team_uid()
+        # Il nome e' ancora una chiave legacy usata dalle tabelle storiche. Se
+        # l'utente lo deve scegliere al primo accesso usiamo un placeholder
+        # interno riconoscibile, mai presentato come nome definitivo nella UI.
+        final_name = requested_name or f"Squadra da scegliere {count + 1}"
+        suffix = 2
+        base_name = final_name
+        while conn.execute("SELECT 1 FROM teams WHERE lower(name)=lower(?)", (final_name,)).fetchone():
+            final_name = f"{base_name} {suffix}"
+            suffix += 1
+        conn.execute(
+            """INSERT INTO teams(uid,name,name_pending,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished)
+               VALUES (?,?,?,?,?,?,1,?,0,0,0)""",
+            (
+                uid, final_name, 0 if requested_name else 1, username, "",
+                hash_pin(temporary_pin), int(rules["initial_budget"]),
+            ),
+        )
+        conn.commit()
+    return get_team_by_uid(uid)
+
+
+def get_team_by_uid(uid: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM teams WHERE uid=?", (str(uid or "").strip(),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_zero_team(uid: str, username: str, name: str | None = None) -> dict:
+    rules = get_league_settings()
+    if rules["auction_mode"] != "zero":
+        raise ValueError("Questa modifica e' disponibile solo nell'asta da zero.")
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("Inserisci uno username.")
+    requested_name = None if name is None else str(name).strip()
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM teams WHERE uid=?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("Squadra non trovata.")
+        if conn.execute("SELECT 1 FROM teams WHERE lower(username)=lower(?) AND uid<>?", (username, uid)).fetchone():
+            raise ValueError("Questo username e' gia' utilizzato.")
+
+        old_name = row["name"]
+        new_name = old_name
+        pending = int(row["name_pending"] or 0)
+        if requested_name:
+            if conn.execute("SELECT 1 FROM teams WHERE lower(name)=lower(?) AND uid<>?", (requested_name, uid)).fetchone():
+                raise ValueError("Questo nome squadra e' gia' utilizzato.")
+            new_name = requested_name
+            pending = 0
+        elif requested_name == "" and not pending:
+            # Un nome gia' definitivo non viene cancellato per errore dal form.
+            new_name = old_name
+
+        if new_name != old_name:
+            dependent = sum(
+                int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (old_name,)).fetchone()[0] or 0)
+                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+            )
+            if dependent:
+                raise ValueError("Il nome squadra non puo' essere modificato dopo l'inizio delle attivita'.")
+            conn.execute("UPDATE teams SET name=?,name_pending=?,username=? WHERE uid=?", (new_name, pending, username, uid))
+        else:
+            conn.execute("UPDATE teams SET name_pending=?,username=? WHERE uid=?", (pending, username, uid))
+        conn.commit()
+    return get_team_by_uid(uid)
+
+
+def delete_zero_team(uid: str):
+    rules = get_league_settings()
+    if rules["auction_mode"] != "zero":
+        raise ValueError("Puoi eliminare manualmente le squadre solo nell'asta da zero.")
+    with get_conn() as conn:
+        row = conn.execute("SELECT name FROM teams WHERE uid=?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("Squadra non trovata.")
+        team = row["name"]
+        dependent = sum(
+            int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (team,)).fetchone()[0] or 0)
+            for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+        )
+        if dependent:
+            raise ValueError("Non puoi eliminare una squadra che ha gia' dati di mercato.")
+        conn.execute("DELETE FROM teams WHERE uid=?", (uid,))
+        conn.commit()
+
+
+def set_manager_by_uid(uid: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT name FROM teams WHERE uid=?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("Squadra non trovata.")
+        conn.execute("UPDATE teams SET is_admin=0")
+        conn.execute("UPDATE teams SET is_admin=1 WHERE uid=?", (uid,))
+        conn.commit()
+
+
+def complete_first_setup(team: str, new_pin: str, requested_name: str | None = None) -> dict:
+    """Completa il primo accesso e, se necessario, assegna il nome squadra."""
+    encoded = hash_pin(new_pin)
+    rules = get_league_settings()
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM teams WHERE name=?", (team,)).fetchone()
+        if not row or not row["pin_must_change"]:
+            raise ValueError("Il setup iniziale non e' richiesto.")
+
+        new_name = row["name"]
+        pending = bool(row["name_pending"])
+        if pending:
+            if rules["auction_mode"] != "zero":
+                raise ValueError("Il nome squadra non puo' essere modificato in questa modalita'.")
+            new_name = str(requested_name or "").strip()
+            if not new_name:
+                raise ValueError("Scegli il nome della tua squadra.")
+            if conn.execute("SELECT 1 FROM teams WHERE lower(name)=lower(?) AND uid<>?", (new_name, row["uid"])).fetchone():
+                raise ValueError("Questo nome squadra e' gia' utilizzato.")
+            dependent = sum(
+                int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (team,)).fetchone()[0] or 0)
+                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+            )
+            if dependent:
+                raise ValueError("Non puoi cambiare il nome squadra dopo l'inizio delle attivita'.")
+
+        if new_name != team:
+            conn.execute(
+                "UPDATE teams SET name=?,name_pending=0,pin='',pin_hash=?,pin_must_change=0 WHERE uid=?",
+                (new_name, encoded, row["uid"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE teams SET name_pending=0,pin='',pin_hash=?,pin_must_change=0 WHERE uid=?",
+                (encoded, row["uid"]),
+            )
+        conn.commit()
+    return get_team(new_name)
 
 
 def get_team_by_credentials(username: str, pin: str):
@@ -858,10 +1034,10 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
         conn.execute(f"DELETE FROM teams WHERE name NOT IN ({placeholders})", teams)
         for team in teams:
             conn.execute(
-                "INSERT OR IGNORE INTO teams(name, username, pin, pin_hash, pin_must_change, budget, is_admin, ready, market_finished) VALUES (?, NULL, '', '', 1, 0, 0, 0, 0)",
-                (team,),
+                "INSERT OR IGNORE INTO teams(uid,name,name_pending,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished) VALUES (?,?,0,NULL,'','',1,0,0,0,0)",
+                (_new_team_uid(), team),
             )
-            conn.execute("UPDATE teams SET ready=0, market_finished=0 WHERE name=?", (team,))
+            conn.execute("UPDATE teams SET name_pending=0, ready=0, market_finished=0 WHERE name=?", (team,))
         conn.executemany(
             "INSERT INTO roster(team,pid,price) VALUES (?,?,?)",
             [(a["team"].strip(), int(a["pid"]), int(a["price"])) for a in assignments],
@@ -1429,8 +1605,12 @@ def get_auction_history(limit: int = 100):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT e.*, p.name AS player_name, p.full_name AS player_full_name, p.roles AS player_roles, p.club AS player_club, p.img AS player_img, p.stats_json AS player_stats_json
-            FROM auction_events e LEFT JOIN players p ON p.pid=e.pid
+            SELECT e.*, p.name AS player_name, p.full_name AS player_full_name, p.roles AS player_roles,
+                   p.club AS player_club, p.img AS player_img, p.stats_json AS player_stats_json,
+                   t.username AS team_username
+            FROM auction_events e
+            LEFT JOIN players p ON p.pid=e.pid
+            LEFT JOIN teams t ON t.name=e.team
             WHERE e.undone=0 ORDER BY e.id DESC LIMIT ?
             """,
             (int(limit),),

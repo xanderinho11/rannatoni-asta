@@ -309,6 +309,13 @@ def build_state(viewer_team: str | None = None):
     state["auto_random"] = auto_random_enabled()
     state["auto_random_seconds"] = auto_random_seconds()
     state["teams"] = _teams_with_presence()
+    team_by_name = {t["name"]: t for t in state["teams"]}
+    if state.get("last_result"):
+        state["last_result"] = dict(state["last_result"])
+        if state["last_result"].get("team"):
+            winner = team_by_name.get(state["last_result"]["team"])
+            if winner:
+                state["last_result"]["team_username"] = winner.get("username") or ""
     state["active_market_count"] = sum(1 for t in state["teams"] if not t.get("market_finished"))
     state["auction_progress"] = db.get_auction_progress()
     rules = db.get_league_settings()
@@ -325,6 +332,8 @@ def build_state(viewer_team: str | None = None):
             roster = db.get_roster(viewer_team)
             state["me"] = {
                 "team": viewer_team,
+                "username": me.get("username") or "",
+                "name_pending": bool(me.get("name_pending")),
                 "budget": int(me["budget"]),
                 "ready": bool(me["ready"]),
                 "is_manager": bool(me["is_admin"]),
@@ -399,7 +408,12 @@ async def logout(session: dict = Depends(get_session)):
 # ========= SUPER ADMIN: PREPARAZIONE =========
 @app.get("/api/admin/stats")
 def admin_stats(_: dict = Depends(require_superadmin)):
-    return {**db.count_rows(), "auction_started": auction_started(), "league_settings": db.get_league_settings()}
+    return {
+        **db.count_rows(),
+        "auction_started": auction_started(),
+        "league_settings": db.get_league_settings(),
+        "stats_labels": db.get_stats_labels(),
+    }
 
 
 @app.post("/api/admin/start-auction")
@@ -421,9 +435,11 @@ async def admin_start_auction(_: dict = Depends(require_superadmin)):
             raise HTTPException(400, "Carica prima le Rose.")
     else:
         if not teams or len(teams) != int(rules["team_count"]):
-            raise HTTPException(400, "Prepara prima tutte le squadre dell'asta da zero.")
+            raise HTTPException(400, "Crea prima tutte le squadre previste per l'asta da zero.")
         if counts.get("roster", 0) != 0:
             raise HTTPException(400, "L'asta da zero deve partire con rose vuote.")
+        if any(t.get("name_pending") for t in teams):
+            raise HTTPException(400, "Prima dell'avvio ogni partecipante deve scegliere il nome della propria squadra.")
     if any(not t.get("username") or not t.get("pin_configured") for t in teams):
         raise HTTPException(400, "Completa prima username e PIN di tutte le squadre.")
     if sum(1 for t in teams if t.get("is_admin")) != 1:
@@ -487,6 +503,21 @@ class TeamConfigBody(BaseModel):
     teams: list[TeamConfigItem]
 
 
+class ZeroTeamCreateBody(BaseModel):
+    username: str
+    pin: str
+    name: Optional[str] = None
+
+
+class ZeroTeamUpdateBody(BaseModel):
+    username: str
+    name: Optional[str] = None
+
+
+class ZeroManagerBody(BaseModel):
+    uid: str
+
+
 class LeagueSettingsBody(BaseModel):
     auction_mode: str = "repair"
     team_count: int = 12
@@ -541,6 +572,72 @@ async def save_team_config(body: TeamConfigBody, _: dict = Depends(require_super
         if str(item.get("pin") or "").strip():
             _invalidate_team_sessions(new_name)
     storage.salva("configurazione squadre")
+    await broadcast_state()
+    return {"ok": True}
+
+
+def _ensure_team_setup_mutable():
+    if simulation_active():
+        raise HTTPException(400, "Termina la simulazione prima di modificare le squadre.")
+    if auction_started() or auction.mode != "idle":
+        raise HTTPException(400, "Le squadre si possono modificare solo prima dell'avvio ufficiale.")
+
+
+@app.post("/api/admin/teams/create")
+async def create_zero_team(body: ZeroTeamCreateBody, _: dict = Depends(require_superadmin)):
+    _ensure_team_setup_mutable()
+    try:
+        team = db.create_zero_team(body.username, body.pin, body.name or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    storage.salva("creazione squadra")
+    await broadcast_state()
+    return {"ok": True, "team": {k: team.get(k) for k in ("uid", "name", "name_pending", "username", "budget")}}
+
+
+@app.post("/api/admin/teams/{uid}/update")
+async def update_zero_team(uid: str, body: ZeroTeamUpdateBody, _: dict = Depends(require_superadmin)):
+    _ensure_team_setup_mutable()
+    previous = db.get_team_by_uid(uid)
+    if not previous:
+        raise HTTPException(404, "Squadra non trovata.")
+    try:
+        team = db.update_zero_team(uid, body.username, body.name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if previous["name"] != team["name"]:
+        _invalidate_team_sessions(previous["name"])
+    storage.salva("modifica squadra")
+    await broadcast_state()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/teams/{uid}")
+async def delete_zero_team(uid: str, _: dict = Depends(require_superadmin)):
+    _ensure_team_setup_mutable()
+    previous = db.get_team_by_uid(uid)
+    if not previous:
+        raise HTTPException(404, "Squadra non trovata.")
+    try:
+        db.delete_zero_team(uid)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _invalidate_team_sessions(previous["name"])
+    storage.salva("eliminazione squadra")
+    await broadcast_state()
+    return {"ok": True}
+
+
+@app.post("/api/admin/teams/manager")
+async def set_zero_manager(body: ZeroManagerBody, _: dict = Depends(require_superadmin)):
+    _ensure_team_setup_mutable()
+    if db.auction_mode() != "zero":
+        raise HTTPException(400, "Usa la configurazione Rose per scegliere il Gestore nell'asta di riparazione.")
+    try:
+        db.set_manager_by_uid(body.uid)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    storage.salva("gestore asta")
     await broadcast_state()
     return {"ok": True}
 
@@ -777,6 +874,7 @@ def free_agents(session: dict = Depends(require_team)):
 
 class FirstPinBody(BaseModel):
     new_pin: str
+    team_name: Optional[str] = None
 
 
 @app.post("/api/account/pin/first")
@@ -784,13 +882,29 @@ async def first_pin_change(body: FirstPinBody, session: dict = Depends(require_t
     team = db.get_team(session["team"])
     if not team or not team.get("pin_must_change"):
         raise HTTPException(400, "Il cambio PIN iniziale non e' richiesto.")
+    old_name = session["team"]
     try:
-        db.set_team_pin(session["team"], body.new_pin, must_change=False)
+        updated = db.complete_first_setup(session["team"], body.new_pin, body.team_name)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    _invalidate_team_sessions(session["team"], keep_token=session["token"])
+    new_name = updated["name"]
+    if new_name != old_name:
+        for tok, info in list(SESSIONS.items()):
+            if info.get("role") == "team" and info.get("team") == old_name:
+                if tok == session["token"]:
+                    info["team"] = new_name
+                else:
+                    SESSIONS.pop(tok, None)
+        for info in manager.connections.values():
+            if info.get("team") == old_name:
+                info["team"] = new_name
+        if old_name in manager.last_presence:
+            manager.last_presence[new_name] = manager.last_presence.pop(old_name)
+        _save_sessions()
+    else:
+        _invalidate_team_sessions(old_name, keep_token=session["token"])
     await broadcast_state()
-    return {"ok": True}
+    return {"ok": True, "team": new_name}
 
 
 class ChangePinBody(BaseModel):
