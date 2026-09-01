@@ -1,0 +1,59 @@
+RANNATONI v18.5 — RESIDUI, CARICAMENTI E SVINCOLATI RANDOM
+
+Patch cumulativa: comprende anche il filtro FVM della v18.4.
+Compatibile con la v18.3 e la v18.4; verificata sul contenuto del repository
+alla versione 18.4, commit 6a9df849174df849aca03c8b0144499f366ad573.
+
+APPLICAZIONE
+1. Estrai lo ZIP.
+2. Nel repository xanderinho11/rannatoni-asta carica i file estratti,
+   mantenendo i percorsi backend/, frontend/ e tests/ e sostituendo i file
+   omonimi. Carica il contenuto estratto, non lo ZIP.
+3. Salva il commit e attendi il deploy Railway del ramo collegato.
+4. Riapri o aggiorna il sito/app.
+
+RESIDUI AUTOMATICI
+- Nelle Impostazioni lega imposta i crediti iniziali per squadra (500 di
+  default) e premi Salva impostazioni prima di importare le Rose.
+- In Riparazione, ogni caricamento delle Rose calcola:
+  residuo = crediti iniziali salvati - somma dei prezzi della rosa nel file.
+  Esempio: 500 - 478 = 22 crediti.
+- La sezione Configura squadre si apre dopo l'import. Correggi i residui che
+  non tornano a causa degli scambi e premi Salva configurazione.
+- Sono ammessi residui negativi e vengono segnalati nel risultato dell'import.
+- Le correzioni restano salvate anche riaprendo il sito o riavviando il server.
+  Un nuovo caricamento delle Rose ricalcola tutti i residui.
+- Il solo aggiornamento del codice non modifica i crediti gia' salvati.
+- Il file deve contenere prezzi interi non negativi; in caso di prezzi
+  mancanti/non validi o giocatori duplicati l'import viene rifiutato.
+- Come gia' previsto dal sito, caricare le Rose sostituisce le rose e avvia
+  una nuova preparazione, cancellando lo storico della sessione precedente.
+
+CONFERME DEI CARICAMENTI
+- Catalogo: nome file e numero di calciatori trovati e caricati.
+- Rose: numero di squadre, giocatori assegnati e conferma del calcolo residui.
+- Statistiche: giocatori collegati, dati riconosciuti ed eventuali voci non
+  abbinate al catalogo.
+- Il caricamento in corso e gli errori sono visibili sotto il rispettivo file.
+- I totali dei dati presenti restano visibili anche riaprendo la pagina.
+
+FVM E SVINCOLATI
+- Soglia 4: candidati con FVM Mantra >= 4, piu' gli svincolati durante la
+  sessione corrente, anche sotto soglia o senza FVM.
+- Soglia 0: nessun filtro FVM. Il valore usa la base 1000.
+- L'eccezione vale per RANDOM manuale e automatico e sopravvive ai riavvii.
+- Un giocatore riacquistato o segnato PASSATO dopo lo svincolo resta escluso.
+- Gli svincoli annullati o appartenenti a una sessione precedente non danno
+  diritto all'eccezione. La chiamata manuale resta disponibile.
+- Se hai gia' importato i dati FVM con la v18.4, non occorre ricaricarli.
+  Altrimenti ricarica il catalogo CSV aggiornato, poi le eventuali statistiche.
+
+VERIFICHE
+- 20 test automatici superati, piu' controlli mirati sui callback del backend
+  e del pannello e verifica della sintassi Python/JavaScript.
+- L'app completa con FastAPI e la verifica visiva nel browser non sono state
+  eseguite: l'ambiente di preparazione non dispone delle dipendenze server e
+  l'accesso del browser locale non era disponibile.
+
+Questa patch non e' stata pubblicata dall'assistente: il collegamento GitHub
+non dispone dei permessi di scrittura.

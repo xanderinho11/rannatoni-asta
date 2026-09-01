@@ -226,9 +226,12 @@ def parse_rosters_csv(text: str):
             result["errors"].append(f"Riga {i+1}: ID non numerico '{id_str}'.")
             continue
         try:
-            price = int(float(price_str))
-        except ValueError:
-            result["errors"].append(f"Riga {i+1}: prezzo non numerico '{price_str}'.")
+            number = float(price_str)
+            if not math.isfinite(number) or number < 0 or not number.is_integer():
+                raise ValueError
+            price = int(number)
+        except (ValueError, OverflowError):
+            result["errors"].append(f"Riga {i+1}: prezzo non valido '{price_str}' (serve un intero non negativo).")
             continue
         result["teams"].setdefault(team, True)
         result["assignments"].append({"team": team, "pid": pid, "price": price})

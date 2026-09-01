@@ -1007,8 +1007,10 @@ def get_stats_labels():
     except Exception: return {}
 
 def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
-    """Sostituisce atomicamente le rose iniziali preservando la configurazione
-    delle squadre che hanno lo stesso nome. Blocca duplicati e ID sconosciuti.
+    """Importa le rose e ricalcola i residui: crediti iniziali meno costo rosa.
+
+    Conserva accessi e gestore delle squadre con lo stesso nome. Il ricalcolo
+    avviene solo durante l'import, senza sovrascrivere successive correzioni.
     """
     teams = [t.strip() for t in team_names if t and t.strip()]
     if not teams:
@@ -1017,15 +1019,24 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
         raise ValueError("Il file rose contiene nomi squadra duplicati.")
 
     seen = {}
+    spent = {team: 0 for team in teams}
     for a in assignments:
         pid = int(a["pid"])
         team = str(a["team"]).strip()
-        if pid in seen and seen[pid] != team:
+        if pid in seen:
+            if seen[pid] == team:
+                raise ValueError(f"Il giocatore ID {pid} compare piu' volte nella rosa di '{team}'.")
             raise ValueError(f"Il giocatore ID {pid} compare sia in '{seen[pid]}' sia in '{team}'.")
         seen[pid] = team
         if team not in teams:
             raise ValueError(f"Assegnazione riferita a squadra sconosciuta: {team}")
+        price = int(a["price"])
+        if price < 0:
+            raise ValueError(f"Il prezzo del giocatore ID {pid} non puo' essere negativo.")
+        spent[team] += price
 
+    initial_budget = int(get_league_settings()["initial_budget"])
+    budgets = {team: initial_budget - cost for team, cost in spent.items()}
     with get_conn() as conn:
         existing_players = {r["pid"] for r in conn.execute("SELECT pid FROM players").fetchall()}
         unknown = set(seen) - existing_players
@@ -1048,7 +1059,10 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
                 "INSERT OR IGNORE INTO teams(uid,name,name_pending,username,pin,pin_hash,pin_must_change,budget,is_admin,ready,market_finished) VALUES (?,?,0,NULL,'','',1,0,0,0,0)",
                 (_new_team_uid(), team),
             )
-            conn.execute("UPDATE teams SET name_pending=0, ready=0, market_finished=0 WHERE name=?", (team,))
+            conn.execute(
+                "UPDATE teams SET budget=?, name_pending=0, ready=0, market_finished=0 WHERE name=?",
+                (budgets[team], team),
+            )
         conn.executemany(
             "INSERT INTO roster(team,pid,price) VALUES (?,?,?)",
             [(a["team"].strip(), int(a["pid"]), int(a["price"])) for a in assignments],
@@ -1063,6 +1077,8 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
             (str(max(0, int(total_players) - initial_owned)),),
         )
         conn.commit()
+    return {"initial_budget": initial_budget, "budgets_calculated": len(budgets),
+            "negative_budget_teams": [team for team, budget in budgets.items() if budget < 0]}
 
 
 def get_player(pid: int):
@@ -1129,6 +1145,31 @@ def session_acquired_player_ids(team: str | None = None) -> set[int]:
         return {int(r["pid"]) for r in rows}
 
 
+def _session_released_player_ids_conn(conn) -> set[int]:
+    """Svincoli confermati nella sessione corrente, esclusi quelli annullati."""
+    rows = conn.execute(
+        """SELECT released_json FROM auction_events
+           WHERE id>? AND undone=0 AND event_type='assigned' AND released_json<>'[]'""",
+        (_session_start_event_id_conn(conn),),
+    ).fetchall()
+    released_ids = set()
+    for row in rows:
+        try:
+            released = json.loads(row["released_json"] or "[]")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(released, list):
+            continue
+        for item in released:
+            if not isinstance(item, dict) or isinstance(item.get("pid"), bool):
+                continue
+            try:
+                released_ids.add(int(item["pid"]))
+            except (KeyError, ValueError, TypeError, OverflowError):
+                continue
+    return released_ids
+
+
 def get_roster(team: str):
     with get_conn() as conn:
         rows = conn.execute(
@@ -1176,8 +1217,9 @@ def free_player_ids(exclude_passed: bool = True):
 def random_player_pool(min_fvm: int | None = None):
     """Candidati RANDOM: liberi, non passati, con FVM >= soglia (0 = tutti).
 
-    Non filtra il catalogo o le chiamate manuali. Un FVM mancante/non valido
-    resta estraibile solo quando il filtro e' disattivato.
+    Gli svincoli confermati nella sessione corrente ignorano la soglia, anche
+    senza FVM. Assegnati e passati restano esclusi. Le chiamate manuali non
+    sono filtrate.
     """
     if min_fvm is None:
         min_fvm = get_league_settings()["random_min_fvm"]
@@ -1187,9 +1229,12 @@ def random_player_pool(min_fvm: int | None = None):
                WHERE pid NOT IN (SELECT pid FROM roster)
                  AND pid NOT IN (SELECT pid FROM passed_players)"""
         ).fetchall()
+        released_ids = _session_released_player_ids_conn(conn) if min_fvm > 0 else set()
     ids = []
     missing = 0
     below = 0
+    missing_excluded = 0
+    release_exceptions = 0
     for row in rows:
         try:
             stats = json.loads(row["stats_json"] or "{}")
@@ -1202,9 +1247,14 @@ def random_player_pool(min_fvm: int | None = None):
         if fvm is None:
             missing += 1
         if min_fvm > 0 and (fvm is None or fvm < min_fvm):
-            if fvm is not None:
-                below += 1
-            continue
+            if row["pid"] in released_ids:
+                release_exceptions += 1
+            else:
+                if fvm is None:
+                    missing_excluded += 1
+                else:
+                    below += 1
+                continue
         ids.append(row["pid"])
     empty_message = ""
     if not ids:
@@ -1215,6 +1265,8 @@ def random_player_pool(min_fvm: int | None = None):
         )
     return {"ids": ids, "min_fvm": min_fvm, "eligible_count": len(ids),
             "total_count": len(rows), "missing_fvm_count": missing,
+            "missing_fvm_excluded_count": missing_excluded,
+            "released_exception_count": release_exceptions,
             "below_min_count": below, "empty_message": empty_message}
 
 

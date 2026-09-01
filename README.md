@@ -14,15 +14,17 @@ In locale la password Super Admin predefinita è `asta2026`. Su Railway va impos
 ## Preparazione asta
 
 1. Apri **⚙️ Impostazioni lega** e scegli **Riparazione** oppure **Da zero**.
-2. Imposta posti rosa, portieri min/max, giocatori di movimento minimi, durata busta, pausa RANDOM e FVM minimo per il sorteggio.
-3. In **Asta da zero** imposta anche numero squadre e crediti iniziali: Rannatoni prepara automaticamente le squadre vuote.
+2. Imposta e salva i crediti iniziali per squadra, posti rosa, portieri min/max, giocatori di movimento minimi, durata busta, pausa RANDOM e FVM minimo per il sorteggio.
+3. In **Asta da zero** imposta anche il numero di squadre, quindi crea gli account nella sezione Squadre.
 4. Carica **Catalogo** e, facoltativamente, le **Statistiche** FantaLab/Strategia (CSV/XLSX).
-5. Solo in **Riparazione** carica le **Rose** e imposta i residui delle singole squadre.
+5. Solo in **Riparazione** carica le **Rose**: i residui vengono calcolati dai crediti iniziali salvati meno il costo di ciascuna rosa. Correggi eventuali differenze nel campo **Residuo (modificabile)** e salva la configurazione. Un nuovo caricamento delle Rose ricalcola tutti i residui; aggiornare la pagina o il codice conserva le correzioni salvate.
 6. Configura nome squadra (da zero), username, PIN temporanei e Gestore.
 7. Salva la configurazione e distribuisci username + PIN temporaneo.
 8. Il Super Admin preme **Avvia asta**.
 
 Al primo login ogni Rannatone deve cambiare il PIN temporaneo con un PIN personale. Il Super Admin non può vedere il PIN personale; può solo resettarlo generando un nuovo PIN temporaneo.
+
+Ogni caricamento mostra il nome del file e il risultato: calciatori importati, squadre trovate e giocatori assegnati, oppure statistiche collegate e voci senza corrispondenza. I totali attualmente presenti restano visibili riaprendo il pannello. I residui negativi vengono segnalati e restano modificabili.
 
 ## Partecipazione
 
@@ -43,7 +45,8 @@ Prima dell'avvio ufficiale viene mostrata la **Lobby** con chi ha già effettuat
 - Le offerte possono essere modificate fino all'apertura.
 - Il valore digitato nel campo offerta resta preservato durante gli aggiornamenti realtime.
 - La pausa RANDOM tra un'asta e la successiva è configurabile (10 secondi di default).
-- Il FVM minimo RANDOM usa il valore Mantra su base 1000: con soglia 4 vengono estratti solo giocatori con FVM ≥ 4. Con 0 il filtro è disattivato.
+- Il FVM minimo RANDOM usa il valore Mantra su base 1000: con soglia 4 sono candidati i giocatori con FVM ≥ 4 e gli svincolati durante la sessione corrente. Con 0 il filtro è disattivato.
+- Gli svincolati nella sessione corrente restano estraibili anche sotto soglia o senza FVM. L'eccezione sopravvive al riavvio, esclude gli svincoli annullati e non si trasferisce alla sessione successiva. Giocatori riacquistati o segnati PASSATI dopo lo svincolo restano esclusi dal RANDOM.
 - La soglia limita solo le estrazioni casuali. Il Gestore può comunque cercare e chiamare manualmente un giocatore sotto soglia.
 - La soglia può essere modificata anche dopo l'avvio e si applica dalla successiva estrazione.
 

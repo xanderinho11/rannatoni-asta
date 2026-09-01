@@ -757,7 +757,7 @@ async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require
     if parsed["errors"]:
         raise HTTPException(400, {"message": "Rose non importate: correggi il file.", "errors": parsed["errors"][:30]})
     try:
-        db.replace_initial_rosters(list(parsed["teams"].keys()), parsed["assignments"])
+        budget_summary = db.replace_initial_rosters(list(parsed["teams"].keys()), parsed["assignments"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     _stop_timer()
@@ -773,6 +773,7 @@ async def upload_rosters(file: UploadFile = File(...), _: dict = Depends(require
         "ok": True,
         "teams_found": len(parsed["teams"]),
         "assignments_loaded": len(parsed["assignments"]),
+        **budget_summary,
     }
 
 
