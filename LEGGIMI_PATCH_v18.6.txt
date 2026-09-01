@@ -1,0 +1,81 @@
+RANNATONI v18.6 — QUOTAZIONE MANTRA E FUORI CAMPIONATO
+
+Patch cumulativa dalla v18.3: comprende le conferme dei caricamenti e il
+calcolo automatico dei residui della v18.5. Il filtro FVM viene sostituito
+dal filtro sulla quotazione attuale Mantra.
+Base verificata: v18.5 su main, commit
+5487b99f111555fa816fbcbf9f9fc77ea51e6b32.
+
+APPLICAZIONE
+1. Estrai lo ZIP e carica i file nel repository xanderinho11/rannatoni-asta,
+   sostituendo gli omonimi e mantenendo backend/, frontend/ e tests/.
+   Carica il contenuto estratto, non lo ZIP.
+2. Salva il commit e attendi il deploy Railway del ramo collegato.
+3. Riapri o aggiorna sito/app. Dal Super Admin ricarica LISTONE.csv nella
+   sezione Catalogo. Le versioni precedenti non conservavano quotazione
+   attuale Mantra e indicatore fuori campionato: occorre questo caricamento.
+4. NON serve ricaricare le Rose: il solo Catalogo conserva rose, prezzi,
+   crediti corretti a mano, account e storico. Un caricamento delle Rose,
+   invece, ricalcola i crediti e azzera la sessione come nella v18.5.
+5. Imposta "Quotazione attuale Mantra minima" (per esempio 4) e premi
+   "Salva impostazioni". La nuova soglia parte da 0: il vecchio valore FVM
+   non viene trasferito, perche' usa una scala diversa.
+6. Se usi un file di statistiche aggiuntive, puoi ricaricarlo dopo il Catalogo
+   per ripristinare Media voto, Fantamedia e Presenze. Il caricamento delle
+   statistiche conserva quotazione Mantra e indicatore fuori campionato.
+
+QUOTAZIONE E RANDOM
+- Soglia 4: estrazione dei giocatori con quotazione attuale Mantra >= 4.
+- Soglia 0: nessun filtro di quotazione; i fuori campionato restano esclusi.
+- Si usa la quotazione aggiornata alla data di esportazione del listone.
+  Nel CSV FantaAsta e' la colonna 8 contando da 1, non la quotazione iniziale,
+  la Classic o il FVM. Il FVM resta importato come dato distinto.
+- Il filtro vale sia per RANDOM avviato a mano sia per RANDOM automatico.
+- La soglia si puo' cambiare durante l'asta e vale dall'estrazione successiva.
+- I giocatori svincolati nella sessione corrente restano estraibili anche
+  sotto soglia o senza quotazione, purche' siano ancora nel campionato.
+- Acquistati, passati, svincoli annullati e svincoli di sessioni precedenti
+  mantengono le regole gia' previste. L'eccezione sopravvive ai riavvii.
+- Per i giocatori nel campionato resta possibile la chiamata manuale per
+  nome anche sotto soglia. I fuori campionato sono bloccati anche qui.
+- Una quotazione generica caricata dalle Statistiche non sostituisce quella
+  identificata come Mantra. Sono riconosciute intestazioni esplicite come
+  "Qt.A Mantra" e "Quotazione attuale Mantra".
+
+FUORI CAMPIONATO
+- Il valore 1 nella colonna 17 del CSV FantaAsta identifica il fuori
+  campionato. Lo 0 identifica un giocatore ancora nel campionato.
+- Questi giocatori non compaiono nell'elenco Svincolati o nella ricerca
+  per la chiamata manuale e non possono essere estratti, nemmeno dopo uno
+  svincolo durante l'asta.
+- Rimangono nelle rose, nella scelta dei giocatori da svincolare, nelle
+  schede e nello storico con un asterisco e l'indicazione "Fuori campionato".
+- Possono quindi essere svincolati dai proprietari secondo le regole gia'
+  previste, senza rientrare tra gli acquistabili.
+- Nomi originali e ID non vengono modificati. Le indicazioni si aggiornano
+  anche nelle viste partecipante e spettatore quando viene ricaricato il
+  catalogo. Un successivo flag 0 rende nuovamente disponibile il giocatore,
+  sempre rispettando proprietario, passati e soglia.
+- Il Catalogo si aggiorna tra una busta e l'altra, non mentre una busta o
+  un'assegnazione con svincoli e' in corso.
+
+CONFERMA IMPORTAZIONE
+- Il caricamento mostra calciatori importati, fuori campionato esclusi e
+  quotazioni Mantra trovate. Il totale dei fuori campionato resta visibile.
+- Verificato sul LISTONE.csv fornito: 571 calciatori, 571 quotazioni Mantra,
+  42 fuori campionato; 529 nel campionato prima di considerare le rose.
+
+VERIFICHE E LIMITI
+- 30 test automatici superati: soglia inclusiva, migrazione del database,
+  persistenza, svincoli, annullamento, storico, protezione degli acquisti,
+  conservazione di rose e crediti, importazioni e aggiornamento statistiche.
+- Verificati i callback effettivi di impostazioni, RANDOM automatico,
+  caricamento Catalogo, ricerca, rose/storico e disponibilita' dei partecipanti
+  e degli spettatori, usando un database temporaneo e il CSV fornito.
+- Verificate sintassi Python/JavaScript e funzioni del pannello e delle viste
+  con un DOM simulato: asterischi, schede, soglia e conferme di caricamento.
+- Non e' stata eseguita una prova completa dell'app FastAPI o una verifica
+  visiva nel browser. Resta da fare la prova sul sito dopo il deploy.
+
+La patch e' pronta da caricare; non e' stata pubblicata dall'assistente.
+Il collegamento GitHub disponibile non consente operazioni di scrittura.

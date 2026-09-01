@@ -14,9 +14,9 @@ import csv_parser
 import db
 
 
-def player(pid, fvm=None):
+def player(pid, quotation=None):
     return {"pid": pid, "name": f"Player {pid}", "roles": ["Dc"],
-            "club": "Club", "stats": {} if fvm is None else {"fvm": fvm}}
+            "club": "Club", "stats": {"fvm": 1000-pid, **({} if quotation is None else {"quotazione_mantra": quotation})}}
 
 
 class FvmImportTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class FvmImportTests(unittest.TestCase):
             self.assertIsNone(csv_parser._parse_stat_number(value))
 
 
-class RandomFvmTests(unittest.TestCase):
+class RandomQuotationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db_path = patch.object(db, "DB_PATH", str(Path(self.temp.name) / "test.db"))
@@ -64,13 +64,13 @@ class RandomFvmTests(unittest.TestCase):
         self.temp.cleanup()
 
     def threshold(self, value):
-        return db.apply_league_settings({"random_min_fvm": value})
+        return db.apply_league_settings({"random_min_quotation": value})
 
     def test_threshold_is_inclusive_and_excludes_owned_passed_and_missing(self):
         self.threshold(4)
         pool = db.random_player_pool()
         self.assertEqual(pool["ids"], [2, 3])
-        self.assertEqual(pool["missing_fvm_count"], 1)
+        self.assertEqual(pool["missing_quotation_count"], 1)
         self.assertEqual(pool["below_min_count"], 2)
         self.assertEqual(pool["eligible_count"], 2)
 
@@ -82,17 +82,18 @@ class RandomFvmTests(unittest.TestCase):
     def test_setting_survives_reinitialization_and_rejects_negative(self):
         self.threshold(4)
         db.init_db()
-        self.assertEqual(db.get_league_settings()["random_min_fvm"], 4)
+        self.assertEqual(db.get_league_settings()["random_min_quotation"], 4)
         with self.assertRaises(ValueError):
             self.threshold(-1)
-        self.assertEqual(db.get_league_settings()["random_min_fvm"], 4)
+        self.assertEqual(db.get_league_settings()["random_min_quotation"], 4)
 
-    def test_stats_refresh_preserves_fvm_even_for_unmatched_players(self):
-        db.update_player_stats([{"pid": 2, "stats": {"media_voto": 6}}])
-        self.assertEqual(db.get_player(2)["stats"], {"fvm": 4, "media_voto": 6})
-        self.assertEqual(db.get_player(3)["stats"], {"fvm": 20})
-        db.update_player_stats([{"pid": 2, "stats": {"fvm": 0}}])
-        self.assertEqual(db.get_player(2)["stats"], {"fvm": 0})
+    def test_stats_refresh_preserves_market_values_and_generic_quote_cannot_override_mantra(self):
+        db.update_player_stats([{"pid": 2, "stats": {"media_voto": 6, "quotazione": 100}}])
+        self.assertEqual(db.get_player(2)["stats"], {"fvm": 998, "quotazione_mantra": 4, "quotazione": 4, "media_voto": 6})
+        self.assertEqual(db.get_player(3)["stats"]["quotazione_mantra"], 20)
+        db.update_player_stats([{"pid": 2, "stats": {"quotazione_mantra": 0}}])
+        self.assertEqual(db.get_player(2)["stats"]["quotazione"], 0)
+        self.assertNotIn(2, db.random_player_pool(4)["ids"])
 
     def test_random_draw_uses_filtered_pool_but_manual_draw_still_works(self):
         self.threshold(4)
@@ -108,16 +109,16 @@ class RandomFvmTests(unittest.TestCase):
     def test_empty_pool_does_not_start_an_auction(self):
         self.threshold(100)
         game = auction.Auction()
-        with self.assertRaisesRegex(auction.AuctionError, "FVM Mantra almeno 100"):
+        with self.assertRaisesRegex(auction.AuctionError, "quotazione attuale Mantra almeno 100"):
             game.open_random()
         self.assertEqual(game.mode, "idle")
         self.assertIsNone(game.current_pid)
 
-    def test_invalid_stored_fvm_cannot_bypass_an_active_filter(self):
+    def test_invalid_stored_quotation_cannot_bypass_an_active_filter(self):
         self.threshold(4)
         for value in (float("nan"), float("inf"), "bad", -5, True):
             with self.subTest(value=value), db.get_conn() as conn:
-                conn.execute("UPDATE players SET stats_json=? WHERE pid=2", (json.dumps({"fvm": value}),))
+                conn.execute("UPDATE players SET stats_json=? WHERE pid=2", (json.dumps({"quotazione_mantra": value}),))
                 conn.commit()
                 self.assertNotIn(2, db.random_player_pool()["ids"])
 

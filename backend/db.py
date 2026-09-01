@@ -42,7 +42,7 @@ DEFAULT_LEAGUE_SETTINGS = {
     "min_outfield": MIN_OUTFIELD,
     "bid_duration": 60,
     "auto_random_delay": 10,
-    "random_min_fvm": 0,
+    "random_min_quotation": 0,
 }
 _LEAGUE_SETTING_KEYS = {key: f"league_{key}" for key in DEFAULT_LEAGUE_SETTINGS}
 
@@ -90,7 +90,8 @@ def init_db():
                 roles TEXT NOT NULL DEFAULT '[]',
                 club TEXT DEFAULT '',
                 img TEXT DEFAULT '',
-                stats_json TEXT NOT NULL DEFAULT '{}'
+                stats_json TEXT NOT NULL DEFAULT '{}',
+                out_of_league INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS roster (
@@ -189,6 +190,8 @@ def init_db():
         player_cols = _table_columns(conn, "players")
         if "stats_json" not in player_cols:
             conn.execute("ALTER TABLE players ADD COLUMN stats_json TEXT NOT NULL DEFAULT '{}'")
+        if "out_of_league" not in player_cols:
+            conn.execute("ALTER TABLE players ADD COLUMN out_of_league INTEGER NOT NULL DEFAULT 0")
         if "full_name" not in player_cols:
             conn.execute("ALTER TABLE players ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
             conn.execute("UPDATE players SET full_name=name WHERE full_name='' OR full_name IS NULL")
@@ -234,7 +237,7 @@ def get_league_settings() -> dict:
     mode = str(raw.get(_LEAGUE_SETTING_KEYS["auction_mode"], defaults["auction_mode"]) or "repair").strip().lower()
     defaults["auction_mode"] = mode if mode in ("repair", "zero") else "repair"
     for key in ("team_count", "initial_budget", "max_roster", "min_goalkeepers",
-                "max_goalkeepers", "min_outfield", "bid_duration", "auto_random_delay", "random_min_fvm"):
+                "max_goalkeepers", "min_outfield", "bid_duration", "auto_random_delay", "random_min_quotation"):
         defaults[key] = _coerce_int(raw.get(_LEAGUE_SETTING_KEYS[key]), defaults[key])
     return defaults
 
@@ -256,7 +259,7 @@ def validate_league_settings(values: dict) -> dict:
         "min_outfield": _coerce_int(merged.get("min_outfield"), current["min_outfield"]),
         "bid_duration": _coerce_int(merged.get("bid_duration"), current["bid_duration"]),
         "auto_random_delay": _coerce_int(merged.get("auto_random_delay"), current["auto_random_delay"]),
-        "random_min_fvm": _coerce_int(merged.get("random_min_fvm"), current["random_min_fvm"]),
+        "random_min_quotation": _coerce_int(merged.get("random_min_quotation"), current["random_min_quotation"]),
     }
     if not 2 <= cfg["team_count"] <= 50:
         raise ValueError("Il numero di squadre deve essere compreso tra 2 e 50.")
@@ -276,8 +279,8 @@ def validate_league_settings(values: dict) -> dict:
         raise ValueError("La durata della busta deve essere compresa tra 10 e 300 secondi.")
     if not 0 <= cfg["auto_random_delay"] <= 120:
         raise ValueError("La pausa RANDOM deve essere compresa tra 0 e 120 secondi.")
-    if cfg["random_min_fvm"] < 0:
-        raise ValueError("Il FVM minimo RANDOM non puo' essere negativo.")
+    if cfg["random_min_quotation"] < 0:
+        raise ValueError("La quotazione minima Mantra per RANDOM non puo' essere negativa.")
     return cfg
 
 
@@ -812,19 +815,32 @@ def count_rows():
         return {
             "teams": conn.execute("SELECT COUNT(*) FROM teams").fetchone()[0],
             "players": conn.execute("SELECT COUNT(*) FROM players").fetchone()[0],
+            "out_of_league": conn.execute("SELECT COUNT(*) FROM players WHERE out_of_league=1").fetchone()[0],
             "roster": conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0],
             "events": conn.execute("SELECT COUNT(*) FROM auction_events WHERE undone=0").fetchone()[0],
         }
 
 
 # ---------- PLAYERS / IMPORT ----------
+def _display_player_stats(raw):
+    try:
+        stats = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(stats, dict):
+        return {}
+    # Compatibilita' con popup e ordinamento gia' esistenti. Il filtro legge
+    # solo quotazione_mantra, mai il dato generico di un altro file.
+    if "quotazione_mantra" in stats:
+        stats["quotazione"] = stats["quotazione_mantra"]
+    return stats
+
+
 def _player_row_to_dict(r):
     d = dict(r)
     d["roles"] = json.loads(d.get("roles") or "[]")
-    try:
-        d["stats"] = json.loads(d.pop("stats_json", "{}") or "{}")
-    except Exception:
-        d["stats"] = {}
+    d["stats"] = _display_player_stats(d.pop("stats_json", "{}"))
+    d["out_of_league"] = bool(d.get("out_of_league"))
     return d
 
 
@@ -845,21 +861,26 @@ def replace_catalog(players: list[dict]):
         # Upsert prima, poi elimina solo i giocatori non piu' presenti. In questo
         # modo le FK delle rose esistenti restano valide durante l'aggiornamento.
         conn.executemany(
-            """INSERT INTO players(pid,name,full_name,roles,club,img,stats_json) VALUES (?,?,?,?,?,?,?)
+            """INSERT INTO players(pid,name,full_name,roles,club,img,stats_json,out_of_league) VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(pid) DO UPDATE SET
                  name=excluded.name, full_name=excluded.full_name, roles=excluded.roles, club=excluded.club, img=excluded.img,
-                 stats_json=excluded.stats_json""",
+                 stats_json=excluded.stats_json, out_of_league=excluded.out_of_league""",
             [
                 (
                     int(p["pid"]), p["name"], p.get("full_name") or p["name"], json.dumps(p.get("roles", [])),
                     p.get("club", ""), p.get("img", ""),
                     json.dumps(p.get("stats", {}), ensure_ascii=False),
+                    int(bool(p.get("out_of_league"))),
                 )
                 for p in players
             ],
         )
         placeholders = ",".join("?" for _ in ids)
         conn.execute(f"DELETE FROM players WHERE pid NOT IN ({placeholders})", ids)
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('catalog_revision','1') "
+            "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1"
+        )
         mode_row = conn.execute("SELECT value FROM settings WHERE key=?", (_LEAGUE_SETTING_KEYS["auction_mode"],)).fetchone()
         mode = str(mode_row["value"] if mode_row else DEFAULT_LEAGUE_SETTINGS["auction_mode"]).strip().lower()
         if mode == "zero":
@@ -913,8 +934,8 @@ def update_player_stats(records: list[dict], labels: dict | None = None):
     """Sostituisce le statistiche opzionali del catalogo.
 
     Collegamento preferito per ID; se l'ID non e' presente (es. Strategia
-    FantaLab) usa Nome breve + Squadra. Le statistiche non influenzano mai
-    Rose, squadre o possibilita' di avviare l'asta.
+    FantaLab) usa Nome breve + Squadra. Rose e squadre restano intatte;
+    la sola quotazione esplicitamente Mantra puo' aggiornare il filtro RANDOM.
     """
     labels = labels or {}
     with get_conn() as conn:
@@ -968,15 +989,15 @@ def update_player_stats(records: list[dict], labels: dict | None = None):
                 continue
             matched_stats.setdefault(pid, {}).update(rec.get("stats") or {})
 
-        # Le statistiche stagionali vengono sostituite. Il FVM e' anche un
-        # dato del catalogo: conservarlo se il nuovo file non lo aggiorna.
+        # Conservare i dati di mercato quando il nuovo file contiene solo
+        # statistiche stagionali. Una quotazione generica non cambia la Mantra.
         for player in catalog:
             pid = int(player["pid"])
             try:
                 previous = json.loads(player["stats_json"] or "{}")
             except (ValueError, TypeError):
                 previous = {}
-            stats = {"fvm": previous["fvm"]} if isinstance(previous, dict) and "fvm" in previous else {}
+            stats = {k: previous[k] for k in ("fvm", "quotazione_mantra") if isinstance(previous, dict) and k in previous}
             stats.update(matched_stats.get(pid, {}))
             conn.execute(
                 "UPDATE players SET stats_json=? WHERE pid=?",
@@ -1099,6 +1120,7 @@ def search_players(query: str, limit: int = 30, exclude_assigned: bool = True):
             """
             SELECT p.* FROM players p
             WHERE (lower(p.name) LIKE ? OR lower(p.full_name) LIKE ?)
+              AND p.out_of_league=0
               AND (?=0 OR p.pid NOT IN (SELECT pid FROM roster))
             ORDER BY p.name COLLATE NOCASE LIMIT ?
             """,
@@ -1174,7 +1196,7 @@ def get_roster(team: str):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT r.pid, r.price, p.name, p.full_name, p.roles, p.club, p.img, p.stats_json
+            SELECT r.pid, r.price, p.name, p.full_name, p.roles, p.club, p.img, p.stats_json, p.out_of_league
             FROM roster r JOIN players p ON p.pid=r.pid
             WHERE r.team=?
             """,
@@ -1206,30 +1228,30 @@ def free_player_ids(exclude_passed: bool = True):
     with get_conn() as conn:
         if exclude_passed:
             rows = conn.execute(
-                """SELECT pid FROM players WHERE pid NOT IN (SELECT pid FROM roster)
+                """SELECT pid FROM players WHERE out_of_league=0 AND pid NOT IN (SELECT pid FROM roster)
                    AND pid NOT IN (SELECT pid FROM passed_players)"""
             ).fetchall()
         else:
-            rows = conn.execute("SELECT pid FROM players WHERE pid NOT IN (SELECT pid FROM roster)").fetchall()
+            rows = conn.execute("SELECT pid FROM players WHERE out_of_league=0 AND pid NOT IN (SELECT pid FROM roster)").fetchall()
         return [r["pid"] for r in rows]
 
 
-def random_player_pool(min_fvm: int | None = None):
-    """Candidati RANDOM: liberi, non passati, con FVM >= soglia (0 = tutti).
+def random_player_pool(min_quotation: int | None = None):
+    """Candidati RANDOM nel campionato, liberi e non passati.
 
     Gli svincoli confermati nella sessione corrente ignorano la soglia, anche
-    senza FVM. Assegnati e passati restano esclusi. Le chiamate manuali non
-    sono filtrate.
+    senza quotazione Mantra. I fuori campionato sono sempre esclusi, anche
+    dagli svincolati. La soglia non si applica alle chiamate manuali.
     """
-    if min_fvm is None:
-        min_fvm = get_league_settings()["random_min_fvm"]
+    if min_quotation is None:
+        min_quotation = get_league_settings()["random_min_quotation"]
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT pid,stats_json FROM players
-               WHERE pid NOT IN (SELECT pid FROM roster)
+               WHERE out_of_league=0 AND pid NOT IN (SELECT pid FROM roster)
                  AND pid NOT IN (SELECT pid FROM passed_players)"""
         ).fetchall()
-        released_ids = _session_released_player_ids_conn(conn) if min_fvm > 0 else set()
+        released_ids = _session_released_player_ids_conn(conn) if min_quotation > 0 else set()
     ids = []
     missing = 0
     below = 0
@@ -1238,19 +1260,19 @@ def random_player_pool(min_fvm: int | None = None):
     for row in rows:
         try:
             stats = json.loads(row["stats_json"] or "{}")
-            raw = stats.get("fvm") if isinstance(stats, dict) else None
-            fvm = float(raw) if raw is not None and not isinstance(raw, bool) else None
-            if fvm is not None and (not math.isfinite(fvm) or fvm < 0):
-                fvm = None
+            raw = stats.get("quotazione_mantra") if isinstance(stats, dict) else None
+            quotation = float(raw) if raw is not None and not isinstance(raw, bool) else None
+            if quotation is not None and (not math.isfinite(quotation) or quotation < 0):
+                quotation = None
         except (ValueError, TypeError, OverflowError):
-            fvm = None
-        if fvm is None:
+            quotation = None
+        if quotation is None:
             missing += 1
-        if min_fvm > 0 and (fvm is None or fvm < min_fvm):
+        if min_quotation > 0 and (quotation is None or quotation < min_quotation):
             if row["pid"] in released_ids:
                 release_exceptions += 1
             else:
-                if fvm is None:
+                if quotation is None:
                     missing_excluded += 1
                 else:
                     below += 1
@@ -1259,13 +1281,13 @@ def random_player_pool(min_fvm: int | None = None):
     empty_message = ""
     if not ids:
         empty_message = (
-            f"Nessun giocatore estraibile con FVM Mantra almeno {min_fvm}. "
-            "Abbassa la soglia nelle impostazioni o aggiorna i dati FVM."
-            if min_fvm > 0 and rows else "Nessun giocatore libero estraibile a caso."
+            f"Nessun giocatore estraibile con quotazione attuale Mantra almeno {min_quotation}. "
+            "Abbassa la soglia nelle impostazioni o ricarica il listone aggiornato."
+            if min_quotation > 0 and rows else "Nessun giocatore libero estraibile a caso."
         )
-    return {"ids": ids, "min_fvm": min_fvm, "eligible_count": len(ids),
-            "total_count": len(rows), "missing_fvm_count": missing,
-            "missing_fvm_excluded_count": missing_excluded,
+    return {"ids": ids, "min_quotation": min_quotation, "eligible_count": len(ids),
+            "total_count": len(rows), "missing_quotation_count": missing,
+            "missing_quotation_excluded_count": missing_excluded,
             "released_exception_count": release_exceptions,
             "below_min_count": below, "empty_message": empty_message}
 
@@ -1358,7 +1380,7 @@ def get_release_floors(team: str) -> dict[int, int]:
 def get_free_agents(viewer_team: str | None = None):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT p.* FROM players p WHERE p.pid NOT IN (SELECT pid FROM roster) ORDER BY p.name COLLATE NOCASE"
+            "SELECT p.* FROM players p WHERE p.out_of_league=0 AND p.pid NOT IN (SELECT pid FROM roster) ORDER BY p.name COLLATE NOCASE"
         ).fetchall()
         passed = {r["pid"] for r in conn.execute("SELECT pid FROM passed_players").fetchall()}
     floors = get_release_floors(viewer_team) if viewer_team else {}
@@ -1385,8 +1407,17 @@ def get_free_agents(viewer_team: str | None = None):
     return {"players": players, "sort_fields": stat_keys}
 
 
+def _require_available_player(conn, pid: int):
+    player = conn.execute("SELECT out_of_league FROM players WHERE pid=?", (int(pid),)).fetchone()
+    if not player:
+        raise ValueError("Giocatore non trovato nel catalogo.")
+    if player["out_of_league"]:
+        raise ValueError("Giocatore fuori campionato: non disponibile per l'asta.")
+
+
 def assign_player(team: str, pid: int, price: int, charge_budget: bool = True):
     with get_conn() as conn:
+        _require_available_player(conn, pid)
         if conn.execute("SELECT 1 FROM roster WHERE pid=?", (pid,)).fetchone():
             raise ValueError("Giocatore gia' assegnato.")
         if not conn.execute("SELECT 1 FROM teams WHERE name=?", (team,)).fetchone():
@@ -1417,6 +1448,7 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
     """Svincoli + acquisto in una singola transazione."""
     released_pids = list(dict.fromkeys(int(p) for p in released_pids))
     with get_conn() as conn:
+        _require_available_player(conn, pid)
         squadra = conn.execute("SELECT budget FROM teams WHERE name=?", (team,)).fetchone()
         if not squadra:
             raise ValueError("Squadra non trovata.")
@@ -1468,21 +1500,22 @@ def complete_purchase_with_releases(team: str, pid: int, price: int, released_pi
 
         released = []
         for p in released_pids:
-            prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json FROM players WHERE pid=?", (p,)).fetchone()
+            prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json, out_of_league FROM players WHERE pid=?", (p,)).fetchone()
             released.append({
                 "pid": p,
                 "price": int(rosa[p]["price"]),
                 "name": prow["name"] if prow else f"ID {p}",
                 "full_name": (prow["full_name"] or prow["name"]) if prow else f"ID {p}",
                 "roles": json.loads(prow["roles"] or "[]") if prow else [],
-                "stats": json.loads(prow["stats_json"] or "{}") if prow else {},
+                "stats": _display_player_stats(prow["stats_json"]) if prow else {},
+                "out_of_league": bool(prow["out_of_league"]) if prow else False,
                 "club": prow["club"] if prow else "",
                 "img": prow["img"] if prow else "",
                 "released_by": team,
             })
             conn.execute("DELETE FROM roster WHERE team=? AND pid=?", (team, p))
-            # Uno svincolato deve tornare immediatamente astabile anche se in
-            # passato era stato segnato come PASSATO.
+            # Riabilita i passati; i fuori campionato restano bloccati dai
+            # controlli di disponibilita', indipendentemente da questo flag.
             conn.execute("DELETE FROM passed_players WHERE pid=?", (p,))
         conn.execute("UPDATE teams SET budget=budget+?-? WHERE name=?", (refund, int(price), team))
         conn.execute("INSERT INTO roster(team,pid,price) VALUES (?,?,?)", (team, int(pid), int(price)))
@@ -1715,6 +1748,7 @@ def get_auction_history(limit: int = 100):
             """
             SELECT e.*, p.name AS player_name, p.full_name AS player_full_name, p.roles AS player_roles,
                    p.club AS player_club, p.img AS player_img, p.stats_json AS player_stats_json,
+                   p.out_of_league AS player_out_of_league,
                    t.username AS team_username
             FROM auction_events e
             LEFT JOIN players p ON p.pid=e.pid
@@ -1730,21 +1764,19 @@ def get_auction_history(limit: int = 100):
             d["rounds"] = json.loads(d.pop("rounds_json") or "[]")
             d["released"] = json.loads(d.pop("released_json") or "[]")
             for rel in d["released"]:
-                if rel.get("pid") is not None and (not rel.get("name") or not rel.get("img")):
-                    prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
+                if rel.get("pid") is not None:
+                    prow = conn.execute("SELECT name, full_name, roles, club, img, stats_json, out_of_league FROM players WHERE pid=?", (int(rel["pid"]),)).fetchone()
                     if prow:
+                        rel["out_of_league"] = bool(prow["out_of_league"])
                         rel.setdefault("name", prow["name"])
                         rel.setdefault("full_name", prow["full_name"] or prow["name"])
                         rel.setdefault("roles", json.loads(prow["roles"] or "[]"))
-                        try: rel.setdefault("stats", json.loads(prow["stats_json"] or "{}"))
-                        except Exception: rel.setdefault("stats", {})
+                        rel.setdefault("stats", _display_player_stats(prow["stats_json"]))
                         rel.setdefault("club", prow["club"] or "")
                         rel.setdefault("img", prow["img"] or "")
             d["player_roles"] = json.loads(d.get("player_roles") or "[]")
-            try:
-                d["player_stats"] = json.loads(d.pop("player_stats_json", "{}") or "{}")
-            except Exception:
-                d["player_stats"] = {}
+            d["player_stats"] = _display_player_stats(d.pop("player_stats_json", "{}"))
+            d["player_out_of_league"] = bool(d.get("player_out_of_league"))
             d["tocca"] = bool(d["tocca"])
             out.append(d)
         return out

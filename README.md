@@ -14,7 +14,7 @@ In locale la password Super Admin predefinita è `asta2026`. Su Railway va impos
 ## Preparazione asta
 
 1. Apri **⚙️ Impostazioni lega** e scegli **Riparazione** oppure **Da zero**.
-2. Imposta e salva i crediti iniziali per squadra, posti rosa, portieri min/max, giocatori di movimento minimi, durata busta, pausa RANDOM e FVM minimo per il sorteggio.
+2. Imposta e salva i crediti iniziali per squadra, posti rosa, portieri min/max, giocatori di movimento minimi, durata busta, pausa RANDOM e quotazione attuale Mantra minima per il sorteggio.
 3. In **Asta da zero** imposta anche il numero di squadre, quindi crea gli account nella sezione Squadre.
 4. Carica **Catalogo** e, facoltativamente, le **Statistiche** FantaLab/Strategia (CSV/XLSX).
 5. Solo in **Riparazione** carica le **Rose**: i residui vengono calcolati dai crediti iniziali salvati meno il costo di ciascuna rosa. Correggi eventuali differenze nel campo **Residuo (modificabile)** e salva la configurazione. Un nuovo caricamento delle Rose ricalcola tutti i residui; aggiornare la pagina o il codice conserva le correzioni salvate.
@@ -45,10 +45,12 @@ Prima dell'avvio ufficiale viene mostrata la **Lobby** con chi ha già effettuat
 - Le offerte possono essere modificate fino all'apertura.
 - Il valore digitato nel campo offerta resta preservato durante gli aggiornamenti realtime.
 - La pausa RANDOM tra un'asta e la successiva è configurabile (10 secondi di default).
-- Il FVM minimo RANDOM usa il valore Mantra su base 1000: con soglia 4 sono candidati i giocatori con FVM ≥ 4 e gli svincolati durante la sessione corrente. Con 0 il filtro è disattivato.
-- Gli svincolati nella sessione corrente restano estraibili anche sotto soglia o senza FVM. L'eccezione sopravvive al riavvio, esclude gli svincoli annullati e non si trasferisce alla sessione successiva. Giocatori riacquistati o segnati PASSATI dopo lo svincolo restano esclusi dal RANDOM.
-- La soglia limita solo le estrazioni casuali. Il Gestore può comunque cercare e chiamare manualmente un giocatore sotto soglia.
+- Il filtro RANDOM usa la quotazione attuale Mantra: con soglia 4 sono candidati i giocatori con quotazione ≥ 4 e gli svincolati durante la sessione corrente, purché ancora nel campionato. Con 0 il filtro di quotazione è disattivato.
+- Gli svincolati nella sessione corrente restano estraibili anche sotto soglia o senza quotazione. L'eccezione sopravvive al riavvio, esclude gli svincoli annullati e non si trasferisce alla sessione successiva. Giocatori riacquistati o segnati PASSATI dopo lo svincolo restano esclusi dal RANDOM.
+- I fuori campionato non sono disponibili nel RANDOM, nell'elenco Svincolati o nella ricerca manuale, anche dopo uno svincolo. Restano nelle rose e nello storico con un asterisco.
+- La soglia limita solo le estrazioni casuali. Il Gestore può comunque cercare e chiamare manualmente un giocatore nel campionato sotto soglia.
 - La soglia può essere modificata anche dopo l'avvio e si applica dalla successiva estrazione.
+- Dopo l'aggiornamento alla v18.6 ricarica il Catalogo per acquisire quotazioni e indicatori fuori campionato; non occorre ricaricare le Rose. La nuova soglia parte da 0 e sostituisce il precedente filtro FVM.
 
 ## Svincoli
 

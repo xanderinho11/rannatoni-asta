@@ -345,6 +345,7 @@ def build_state(viewer_team: str | None = None):
     state["state_version"] = STATE_VERSION
     state["simulation"] = simulation_active()
     state["server_now_ms"] = int(time.time() * 1000)
+    state["catalog_revision"] = db.get_setting("catalog_revision", "0")
     state["auction_started"] = auction_started()
     state["auto_random"] = auto_random_enabled()
     state["auto_random_seconds"] = auto_random_seconds()
@@ -352,6 +353,15 @@ def build_state(viewer_team: str | None = None):
     team_by_name = {t["name"]: t for t in state["teams"]}
     if state.get("last_result"):
         state["last_result"] = dict(state["last_result"])
+        result = state["last_result"]
+        player = db.get_player(result["pid"]) if result.get("pid") is not None else None
+        if player:
+            result["player_out_of_league"] = player["out_of_league"]
+        result["released"] = [dict(item) for item in result.get("released", [])]
+        for item in result["released"]:
+            released_player = db.get_player(item["pid"]) if item.get("pid") is not None else None
+            if released_player:
+                item["out_of_league"] = released_player["out_of_league"]
         if state["last_result"].get("team"):
             winner = team_by_name.get(state["last_result"]["team"])
             if winner:
@@ -360,14 +370,14 @@ def build_state(viewer_team: str | None = None):
     state["auction_progress"] = db.get_auction_progress()
     rules = db.get_league_settings()
     if auction.mode == "idle":
-        state["random_pool"] = {k: v for k, v in db.random_player_pool(rules["random_min_fvm"]).items() if k != "ids"}
+        state["random_pool"] = {k: v for k, v in db.random_player_pool(rules["random_min_quotation"]).items() if k != "ids"}
     state["league"] = {
         "auction_mode": rules["auction_mode"],
         "max_roster": int(rules["max_roster"]),
         "min_goalkeepers": int(rules["min_goalkeepers"]),
         "max_goalkeepers": int(rules["max_goalkeepers"]),
         "min_outfield": int(rules["min_outfield"]),
-        "random_min_fvm": int(rules["random_min_fvm"]),
+        "random_min_quotation": int(rules["random_min_quotation"]),
     }
     if viewer_team:
         me = db.get_team(viewer_team)
@@ -573,7 +583,7 @@ class LeagueSettingsBody(BaseModel):
     min_outfield: int = 21
     bid_duration: int = 60
     auto_random_delay: int = 10
-    random_min_fvm: int = Field(default=0, ge=0)
+    random_min_quotation: int = Field(default=0, ge=0)
 
 
 @app.post("/api/admin/league-settings")
@@ -586,11 +596,11 @@ async def save_league_settings(body: LeagueSettingsBody, _: dict = Depends(requi
             if auction_started() or auction.mode != "idle":
                 current = db.get_league_settings()
                 cfg = db.validate_league_settings(values)
-                if any(cfg[k] != current[k] for k in cfg if k != "random_min_fvm"):
-                    raise ValueError("Dopo l'avvio puoi modificare solo il FVM minimo RANDOM.")
+                if any(cfg[k] != current[k] for k in cfg if k != "random_min_quotation"):
+                    raise ValueError("Dopo l'avvio puoi modificare solo la quotazione minima Mantra per RANDOM.")
                 # Il filtro riguarda la prossima estrazione: non tocca rose,
                 # crediti, partecipanti o la busta eventualmente gia' aperta.
-                db.set_setting("league_random_min_fvm", str(cfg["random_min_fvm"]))
+                db.set_setting("league_random_min_quotation", str(cfg["random_min_quotation"]))
                 result = {"settings": cfg, "setup_rebuilt": False}
             else:
                 result = db.apply_league_settings(values)
@@ -708,12 +718,20 @@ async def upload_catalog(file: UploadFile = File(...), _: dict = Depends(require
     parsed = csv_parser.parse_catalog_csv(raw.decode("utf-8-sig", errors="replace"))
     if parsed["errors"]:
         raise HTTPException(400, {"message": "Catalogo non importato: correggi il file.", "errors": parsed["errors"][:30]})
-    try:
-        db.replace_catalog(parsed["players"])
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    async with AUCTION_LOCK:
+        if auction.mode != "idle":
+            raise HTTPException(400, "Attendi la conclusione dell'asta in corso prima di aggiornare il catalogo.")
+        try:
+            db.replace_catalog(parsed["players"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     storage.salva("catalogo")
-    return {"ok": True, "players_loaded": len(parsed["players"])}
+    if auto_random_enabled():
+        await _arm_auto_random()
+    await broadcast_state()
+    return {"ok": True, "players_loaded": len(parsed["players"]),
+            "out_of_league": sum(p["out_of_league"] for p in parsed["players"]),
+            "quotations_loaded": sum("quotazione_mantra" in p["stats"] for p in parsed["players"])}
 
 
 @app.post("/api/admin/upload/statistics")

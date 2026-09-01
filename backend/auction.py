@@ -98,8 +98,11 @@ class Auction:
     def open_player(self, pid: int):
         if self.mode != "idle":
             raise AuctionError("C'e' gia' un'asta in corso.")
-        if db.get_player(pid) is None:
+        player = db.get_player(pid)
+        if player is None:
             raise AuctionError("Giocatore non trovato nel catalogo.")
+        if player.get("out_of_league"):
+            raise AuctionError("Giocatore fuori campionato: non disponibile per l'asta.")
         owner = db.player_owner(pid)
         if owner:
             raise AuctionError(f"Giocatore gia' assegnato a {owner}.")
@@ -269,6 +272,7 @@ class Auction:
                 "player_club": player.get("club", "") if player else "",
                 "player_img": player.get("img", "") if player else "",
                 "player_stats": dict(player.get("stats") or {}) if player else {},
+                "player_out_of_league": bool(player and player.get("out_of_league")),
                 "reveal": reveal, "rounds": list(self.round_history),
             }
             self.reset(persist=False)
@@ -316,6 +320,7 @@ class Auction:
             "player_club": player.get("club", "") if player else "",
             "player_img": player.get("img", "") if player else "",
             "player_stats": dict(player.get("stats") or {}) if player else {},
+            "player_out_of_league": bool(player and player.get("out_of_league")),
             "price": int(price), "reveal": reveal,
             "rounds": list(self.round_history), "tocca": bool(tocca),
             "release_floor_applied": int(release_floor or 0),

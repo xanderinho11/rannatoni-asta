@@ -26,13 +26,18 @@ STAT_HEADER_ALIASES = {
     "rigori_parati": {"rp", "rigori parati"},
 }
 
-# Il FVM serve anche al filtro RANDOM; le altre colonne numeriche non
-# riconosciute (eta', costo, ecc.) restano escluse dall'import.
-SUPPORTED_STAT_KEYS = ("media_voto", "fantamedia", "quotazione", "presenze", "fvm")
+# Solo la quotazione identificata come Mantra alimenta il filtro RANDOM.
+SUPPORTED_STAT_KEYS = ("media_voto", "fantamedia", "quotazione", "quotazione_mantra", "presenze", "fvm")
 FVM_MANTRA_HEADERS = {"fvmm", "fvm m", "fvm mantra", "fvm ma", "fvm mantra/1000", "fvm mantra / 1000"}
+QUOTATION_MANTRA_HEADERS = {
+    "qt.a m", "qt.a mantra", "qt.a m.", "qta m", "qta mantra", "qt.am",
+    "quotazione mantra", "quotazione attuale mantra", "quotazione mantra attuale",
+}
+OUT_OF_LEAGUE_HEADERS = {"fuori lista", "fuori campionato", "out of league"}
 
 STAT_LABELS = {
     "quotazione": "Quotazione",
+    "quotazione_mantra": "Quotazione attuale Mantra",
     "fvm": "FVM Mantra",
     "fantamedia": "FantaMedia",
     "media_voto": "Media voto",
@@ -78,6 +83,11 @@ def _stat_columns(header):
     for idx, name in enumerate(normalized):
         if name in FVM_MANTRA_HEADERS:
             columns["fvm"] = idx
+            break
+    for idx, name in enumerate(normalized):
+        if name in QUOTATION_MANTRA_HEADERS:
+            columns.pop("quotazione", None)
+            columns["quotazione_mantra"] = idx
             break
     return columns
 
@@ -253,6 +263,8 @@ def parse_catalog_csv(text: str):
 
     header = rows[0] if rows and rows[0] and rows[0][0].strip().upper() == "ID" else []
     stat_cols = _stat_columns(header) if header else {}
+    flag_col = next((i for i, name in enumerate(header)
+                     if _norm_header(name) in OUT_OF_LEAGUE_HEADERS), None) if header else 16
     id_seen = set()
     for i, raw_row in enumerate(rows):
         r = list(raw_row)
@@ -284,6 +296,12 @@ def parse_catalog_csv(text: str):
                 break
 
         stats = {}
+        # FantaAsta: 5/6 = Classic attuale/iniziale, 7/8 = Mantra
+        # attuale/iniziale. Non ricavare la quotazione dal FVM o dalla Classic.
+        if not header and len(raw_row) >= 9:
+            quotation = _parse_stat_number(raw_row[7])
+            if quotation is not None and quotation >= 0:
+                stats["quotazione_mantra"] = quotation
         # Catalogo standard FantaAsta senza intestazione: dopo il club
         # (indice 9) arrivano FVM Classic (10) e FVM Mantra (11), base 1000.
         if not header and len(raw_row) >= 12:
@@ -293,8 +311,16 @@ def parse_catalog_csv(text: str):
         for key, idx in stat_cols.items():
             if idx < len(raw_row):
                 value = _parse_stat_number(raw_row[idx])
-                if value is not None:
+                if value is not None and (key not in {"quotazione_mantra", "fvm"} or value >= 0):
                     stats[key] = value
+
+        out_of_league = False
+        if flag_col is not None and flag_col < len(raw_row):
+            flag = str(raw_row[flag_col]).strip()
+            if flag not in {"", "0", "1"}:
+                result["errors"].append(f"Riga {i+1}: indicatore fuori campionato non valido '{flag}'.")
+                continue
+            out_of_league = flag == "1"
 
         roles = normalize_roles(ruolo_raw)
         result["players"].append({
@@ -305,6 +331,7 @@ def parse_catalog_csv(text: str):
             "club": club,
             "img": image_url,
             "stats": stats,
+            "out_of_league": out_of_league,
         })
     return result
 
@@ -379,8 +406,8 @@ def parse_stats_rows(rows: list[list[str]]):
                 if value is not None:
                     values.append(value)
         # Le metriche stagionali tutte a zero non generano popup fasulli.
-        # Per il filtro RANDOM, invece, anche FVM = 0 e' un dato valido.
-        if not values or (key != "fvm" and not any(abs(float(v)) > 1e-12 for v in values)):
+        # Quotazione Mantra e FVM = 0 sono dati validi.
+        if not values or (key not in {"fvm", "quotazione_mantra"} and not any(abs(float(v)) > 1e-12 for v in values)):
             continue
         col_to_key[idx] = key
         result["labels"][key] = STAT_LABELS.get(key, str(header[idx]).strip() or key)
