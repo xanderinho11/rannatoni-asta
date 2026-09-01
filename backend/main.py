@@ -359,12 +359,15 @@ def build_state(viewer_team: str | None = None):
     state["active_market_count"] = sum(1 for t in state["teams"] if not t.get("market_finished"))
     state["auction_progress"] = db.get_auction_progress()
     rules = db.get_league_settings()
+    if auction.mode == "idle":
+        state["random_pool"] = {k: v for k, v in db.random_player_pool(rules["random_min_fvm"]).items() if k != "ids"}
     state["league"] = {
         "auction_mode": rules["auction_mode"],
         "max_roster": int(rules["max_roster"]),
         "min_goalkeepers": int(rules["min_goalkeepers"]),
         "max_goalkeepers": int(rules["max_goalkeepers"]),
         "min_outfield": int(rules["min_outfield"]),
+        "random_min_fvm": int(rules["random_min_fvm"]),
     }
     if viewer_team:
         me = db.get_team(viewer_team)
@@ -454,6 +457,7 @@ def admin_stats(_: dict = Depends(require_superadmin)):
         "auction_started": auction_started(),
         "league_settings": db.get_league_settings(),
         "stats_labels": db.get_stats_labels(),
+        "random_pool": {k: v for k, v in db.random_player_pool().items() if k != "ids"},
     }
 
 
@@ -569,18 +573,29 @@ class LeagueSettingsBody(BaseModel):
     min_outfield: int = 21
     bid_duration: int = 60
     auto_random_delay: int = 10
+    random_min_fvm: int = Field(default=0, ge=0)
 
 
 @app.post("/api/admin/league-settings")
 async def save_league_settings(body: LeagueSettingsBody, _: dict = Depends(require_superadmin)):
     if simulation_active():
         raise HTTPException(400, "Termina la simulazione prima di modificare le impostazioni della lega.")
-    if auction_started() or auction.mode != "idle":
-        raise HTTPException(400, "Le impostazioni della lega si possono modificare solo prima dell'avvio ufficiale.")
-    try:
-        result = db.apply_league_settings(body.model_dump())
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    async with AUCTION_LOCK:
+        try:
+            values = body.model_dump()
+            if auction_started() or auction.mode != "idle":
+                current = db.get_league_settings()
+                cfg = db.validate_league_settings(values)
+                if any(cfg[k] != current[k] for k in cfg if k != "random_min_fvm"):
+                    raise ValueError("Dopo l'avvio puoi modificare solo il FVM minimo RANDOM.")
+                # Il filtro riguarda la prossima estrazione: non tocca rose,
+                # crediti, partecipanti o la busta eventualmente gia' aperta.
+                db.set_setting("league_random_min_fvm", str(cfg["random_min_fvm"]))
+                result = {"settings": cfg, "setup_rebuilt": False}
+            else:
+                result = db.apply_league_settings(values)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if result.get("setup_rebuilt"):
         _stop_timer()
         _cancel_tocca_task()
@@ -594,6 +609,8 @@ async def save_league_settings(body: LeagueSettingsBody, _: dict = Depends(requi
         _save_sessions()
         manager.last_presence.clear()
     storage.salva("impostazioni lega")
+    if auction.mode == "idle" and auto_random_enabled():
+        await _arm_auto_random()
     await broadcast_state()
     return {"ok": True, **result}
 
@@ -1162,6 +1179,9 @@ async def _arm_auto_random():
     if not ready:
         await broadcast_state()
         return False
+    if not db.random_player_pool()["ids"]:
+        await broadcast_state()
+        return False
     _auto_random_deadline = time.time() + db.auto_random_delay()
 
     async def runner():
@@ -1186,8 +1206,11 @@ async def _arm_auto_random():
         except auction_module.AuctionError as exc:
             print(f"[auto-random] {exc}")
         finally:
-            _auto_random_task = None
-            _auto_random_deadline = None
+            # Un cambio soglia puo' aver gia' avviato un nuovo countdown.
+            # Il task cancellato non deve azzerare quello che lo sostituisce.
+            if _auto_random_task is asyncio.current_task():
+                _auto_random_task = None
+                _auto_random_deadline = None
             await broadcast_state()
 
     _auto_random_task = asyncio.create_task(runner())

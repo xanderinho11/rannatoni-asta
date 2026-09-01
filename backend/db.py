@@ -10,6 +10,7 @@ import datetime as _dt
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -41,6 +42,7 @@ DEFAULT_LEAGUE_SETTINGS = {
     "min_outfield": MIN_OUTFIELD,
     "bid_duration": 60,
     "auto_random_delay": 10,
+    "random_min_fvm": 0,
 }
 _LEAGUE_SETTING_KEYS = {key: f"league_{key}" for key in DEFAULT_LEAGUE_SETTINGS}
 
@@ -232,7 +234,7 @@ def get_league_settings() -> dict:
     mode = str(raw.get(_LEAGUE_SETTING_KEYS["auction_mode"], defaults["auction_mode"]) or "repair").strip().lower()
     defaults["auction_mode"] = mode if mode in ("repair", "zero") else "repair"
     for key in ("team_count", "initial_budget", "max_roster", "min_goalkeepers",
-                "max_goalkeepers", "min_outfield", "bid_duration", "auto_random_delay"):
+                "max_goalkeepers", "min_outfield", "bid_duration", "auto_random_delay", "random_min_fvm"):
         defaults[key] = _coerce_int(raw.get(_LEAGUE_SETTING_KEYS[key]), defaults[key])
     return defaults
 
@@ -254,6 +256,7 @@ def validate_league_settings(values: dict) -> dict:
         "min_outfield": _coerce_int(merged.get("min_outfield"), current["min_outfield"]),
         "bid_duration": _coerce_int(merged.get("bid_duration"), current["bid_duration"]),
         "auto_random_delay": _coerce_int(merged.get("auto_random_delay"), current["auto_random_delay"]),
+        "random_min_fvm": _coerce_int(merged.get("random_min_fvm"), current["random_min_fvm"]),
     }
     if not 2 <= cfg["team_count"] <= 50:
         raise ValueError("Il numero di squadre deve essere compreso tra 2 e 50.")
@@ -273,6 +276,8 @@ def validate_league_settings(values: dict) -> dict:
         raise ValueError("La durata della busta deve essere compresa tra 10 e 300 secondi.")
     if not 0 <= cfg["auto_random_delay"] <= 120:
         raise ValueError("La pausa RANDOM deve essere compresa tra 0 e 120 secondi.")
+    if cfg["random_min_fvm"] < 0:
+        raise ValueError("Il FVM minimo RANDOM non puo' essere negativo.")
     return cfg
 
 
@@ -913,7 +918,7 @@ def update_player_stats(records: list[dict], labels: dict | None = None):
     """
     labels = labels or {}
     with get_conn() as conn:
-        rows = conn.execute("SELECT pid,name,full_name,club FROM players").fetchall()
+        rows = conn.execute("SELECT pid,name,full_name,club,stats_json FROM players").fetchall()
         catalog = [dict(r) for r in rows]
         catalog_ids = {int(r["pid"]) for r in catalog}
 
@@ -963,10 +968,16 @@ def update_player_stats(records: list[dict], labels: dict | None = None):
                 continue
             matched_stats.setdefault(pid, {}).update(rec.get("stats") or {})
 
-        # Un nuovo file statistiche sostituisce il precedente: in questo modo
-        # chi non trova corrispondenza resta davvero senza dato e finisce in fondo.
-        conn.execute("UPDATE players SET stats_json='{}'")
-        for pid, stats in matched_stats.items():
+        # Le statistiche stagionali vengono sostituite. Il FVM e' anche un
+        # dato del catalogo: conservarlo se il nuovo file non lo aggiorna.
+        for player in catalog:
+            pid = int(player["pid"])
+            try:
+                previous = json.loads(player["stats_json"] or "{}")
+            except (ValueError, TypeError):
+                previous = {}
+            stats = {"fvm": previous["fvm"]} if isinstance(previous, dict) and "fvm" in previous else {}
+            stats.update(matched_stats.get(pid, {}))
             conn.execute(
                 "UPDATE players SET stats_json=? WHERE pid=?",
                 (json.dumps(stats, ensure_ascii=False), int(pid)),
@@ -1160,6 +1171,51 @@ def free_player_ids(exclude_passed: bool = True):
         else:
             rows = conn.execute("SELECT pid FROM players WHERE pid NOT IN (SELECT pid FROM roster)").fetchall()
         return [r["pid"] for r in rows]
+
+
+def random_player_pool(min_fvm: int | None = None):
+    """Candidati RANDOM: liberi, non passati, con FVM >= soglia (0 = tutti).
+
+    Non filtra il catalogo o le chiamate manuali. Un FVM mancante/non valido
+    resta estraibile solo quando il filtro e' disattivato.
+    """
+    if min_fvm is None:
+        min_fvm = get_league_settings()["random_min_fvm"]
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT pid,stats_json FROM players
+               WHERE pid NOT IN (SELECT pid FROM roster)
+                 AND pid NOT IN (SELECT pid FROM passed_players)"""
+        ).fetchall()
+    ids = []
+    missing = 0
+    below = 0
+    for row in rows:
+        try:
+            stats = json.loads(row["stats_json"] or "{}")
+            raw = stats.get("fvm") if isinstance(stats, dict) else None
+            fvm = float(raw) if raw is not None and not isinstance(raw, bool) else None
+            if fvm is not None and (not math.isfinite(fvm) or fvm < 0):
+                fvm = None
+        except (ValueError, TypeError, OverflowError):
+            fvm = None
+        if fvm is None:
+            missing += 1
+        if min_fvm > 0 and (fvm is None or fvm < min_fvm):
+            if fvm is not None:
+                below += 1
+            continue
+        ids.append(row["pid"])
+    empty_message = ""
+    if not ids:
+        empty_message = (
+            f"Nessun giocatore estraibile con FVM Mantra almeno {min_fvm}. "
+            "Abbassa la soglia nelle impostazioni o aggiorna i dati FVM."
+            if min_fvm > 0 and rows else "Nessun giocatore libero estraibile a caso."
+        )
+    return {"ids": ids, "min_fvm": min_fvm, "eligible_count": len(ids),
+            "total_count": len(rows), "missing_fvm_count": missing,
+            "below_min_count": below, "empty_message": empty_message}
 
 
 def _is_goalkeeper_roles(roles) -> bool:

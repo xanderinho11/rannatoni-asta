@@ -1,0 +1,40 @@
+RANNATONI v18.4 — FILTRO FVM RANDOM
+
+Patch preparata sulla versione GitHub 18.3 (commit b26e891).
+
+APPLICAZIONE
+1. Estrai lo ZIP.
+2. Nel repository xanderinho11/rannatoni-asta carica i file estratti,
+   mantenendo i percorsi backend/, frontend/ e tests/ e sostituendo i file
+   omonimi. Carica il contenuto estratto, non il file ZIP.
+3. Salva il commit. Se Railway e' collegato al ramo aggiornato, attendi
+   il completamento del relativo deploy.
+4. Nel Super Admin ricarica una volta il catalogo CSV aggiornato che usi
+   per questa asta: questo importa il FVM dei giocatori gia' presenti.
+   Ricarica poi l'eventuale file statistiche per ripristinarne gli altri dati.
+5. In Impostazioni lega imposta "FVM minimo per estrazione RANDOM" e
+   premi "Salva impostazioni".
+
+FUNZIONAMENTO
+- Soglia 4: vengono estratti solo i giocatori con FVM Mantra >= 4.
+- Soglia 0: filtro disattivato (comportamento precedente).
+- Il valore e' su base 1000, senza conversione al budget della lega.
+- Il filtro vale per il pulsante Estrai RANDOM e per la modalita' automatica.
+- Con filtro attivo, i giocatori senza un FVM valido sono esclusi.
+- La ricerca e la chiamata manuale restano disponibili per tutti gli svincolati.
+- Il conteggio nelle impostazioni si riferisce alla soglia salvata.
+- La soglia puo' essere cambiata ad asta avviata: vale dalla prossima estrazione.
+- Se non restano candidati, il countdown si ferma. Abbassa la soglia o aggiorna
+  il FVM per rendere disponibili altri candidati.
+
+VERIFICHE
+- 10 test automatici su import, soglia inclusiva, mancanti, assegnati/passati,
+  persistenza, aggiornamento statistiche e chiamata manuale.
+- Controllati direttamente i callback di salvataggio e di estrazione
+  automatica, inclusa la sostituzione del countdown.
+- Verificata la sintassi Python e JavaScript.
+- L'anteprima visiva e l'app completa con FastAPI non sono state eseguite:
+  l'ambiente blocca il browser locale e non dispone delle dipendenze del server.
+
+Il sito online non e' stato modificato. La scrittura GitHub tramite il
+collegamento dell'assistente non e' disponibile.

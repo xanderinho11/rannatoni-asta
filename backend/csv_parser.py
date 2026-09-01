@@ -4,13 +4,14 @@ Logica ripresa e adattata dal bot Telegram originale.
 """
 import csv
 import io
+import math
 
 ALLOWED_MANTRA_ROLES = {"P", "Ds", "Dc", "Dd", "E", "M", "C", "W", "T", "A", "Pc", "B"}
 
 
 STAT_HEADER_ALIASES = {
     "quotazione": {"qt.a", "qta", "quotazione", "quotazione attuale", "quot", "quot.", "qt", "quo"},
-    "fvm": {"fvm", "fanta valore di mercato", "fantavalore", "fanta valore"},
+    "fvm": {"fvm", "fvm/1000", "fvm / 1000", "fanta valore di mercato", "fantavalore", "fanta valore"},
     "fantamedia": {"fm", "fmv", "fantamedia", "fanta media", "fanta media voto"},
     "media_voto": {"mv", "media voto", "media voti", "media"},
     "presenze": {"pv", "pgv", "pgv.", "presenze", "presenza"},
@@ -25,15 +26,14 @@ STAT_HEADER_ALIASES = {
     "rigori_parati": {"rp", "rigori parati"},
 }
 
-# Queste sono le metriche che Rannatoni usa davvero nell'interfaccia. Il file
-# puo' contenere molte altre colonne numeriche, ma non le importiamo solo perche'
-# esistono: in questo modo un listone Euroleghe con FVM/1000, Under, ecc. viene
-# riconosciuto correttamente senza trasformare ogni numero in una statistica.
-SUPPORTED_STAT_KEYS = ("media_voto", "fantamedia", "quotazione", "presenze")
+# Il FVM serve anche al filtro RANDOM; le altre colonne numeriche non
+# riconosciute (eta', costo, ecc.) restano escluse dall'import.
+SUPPORTED_STAT_KEYS = ("media_voto", "fantamedia", "quotazione", "presenze", "fvm")
+FVM_MANTRA_HEADERS = {"fvmm", "fvm m", "fvm mantra", "fvm ma", "fvm mantra/1000", "fvm mantra / 1000"}
 
 STAT_LABELS = {
     "quotazione": "Quotazione",
-    "fvm": "FVM",
+    "fvm": "FVM Mantra",
     "fantamedia": "FantaMedia",
     "media_voto": "Media voto",
     "presenze": "Presenze",
@@ -52,7 +52,7 @@ def _norm_header(value: str):
     return " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
 
 def _parse_stat_number(value):
-    raw = str(value or "").strip().replace("%", "")
+    raw = str(value if value is not None else "").strip().replace("%", "")
     if not raw or raw in {"-", "--", "n.d.", "nd", "nan"}:
         return None
     # In molti CSV italiani la virgola e' il separatore decimale.
@@ -60,6 +60,8 @@ def _parse_stat_number(value):
     try:
         n = float(raw)
     except ValueError:
+        return None
+    if not math.isfinite(n):
         return None
     return int(n) if n.is_integer() else round(n, 3)
 
@@ -71,6 +73,12 @@ def _stat_columns(header):
             if name in aliases:
                 columns[key] = idx
                 break
+    # Se il file contiene entrambi i sistemi di gioco, Mantra ha precedenza
+    # sul campo generico FVM. Una colonna esplicitamente Classic non e' usata.
+    for idx, name in enumerate(normalized):
+        if name in FVM_MANTRA_HEADERS:
+            columns["fvm"] = idx
+            break
     return columns
 
 
@@ -273,6 +281,12 @@ def parse_catalog_csv(text: str):
                 break
 
         stats = {}
+        # Catalogo standard FantaAsta senza intestazione: dopo il club
+        # (indice 9) arrivano FVM Classic (10) e FVM Mantra (11), base 1000.
+        if not header and len(raw_row) >= 12:
+            fvm = _parse_stat_number(raw_row[11])
+            if fvm is not None and fvm >= 0:
+                stats["fvm"] = fvm
         for key, idx in stat_cols.items():
             if idx < len(raw_row):
                 value = _parse_stat_number(raw_row[idx])
@@ -361,10 +375,9 @@ def parse_stats_rows(rows: list[list[str]]):
                 value = _parse_stat_number(row[idx])
                 if value is not None:
                     values.append(value)
-        # Una metrica tutta a zero non aggiunge informazione e non deve generare
-        # filtri/popup fasulli. Quando almeno un valore e' significativo, invece,
-        # conserviamo anche gli eventuali zeri degli altri giocatori.
-        if not values or not any(abs(float(v)) > 1e-12 for v in values):
+        # Le metriche stagionali tutte a zero non generano popup fasulli.
+        # Per il filtro RANDOM, invece, anche FVM = 0 e' un dato valido.
+        if not values or (key != "fvm" and not any(abs(float(v)) > 1e-12 for v in values)):
             continue
         col_to_key[idx] = key
         result["labels"][key] = STAT_LABELS.get(key, str(header[idx]).strip() or key)

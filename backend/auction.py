@@ -120,9 +120,10 @@ class Auction:
         self._persist()
 
     def open_random(self):
-        liberi = db.free_player_ids(exclude_passed=True)
+        pool = db.random_player_pool()
+        liberi = pool["ids"]
         if not liberi:
-            raise AuctionError("Nessun giocatore libero estraibile a caso.")
+            raise AuctionError(pool["empty_message"])
         pid = random.choice(liberi)
         self.open_player(pid)
         return pid
