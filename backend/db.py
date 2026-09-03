@@ -342,7 +342,7 @@ def apply_league_settings(values: dict) -> dict:
                 "UPDATE teams SET budget=?, ready=0, market_finished=0",
                 (cfg["initial_budget"],),
             )
-            total_players = int(conn.execute("SELECT COUNT(*) FROM players").fetchone()[0] or 0)
+            total_players = _initial_auction_pool_total_conn(conn)
             conn.execute(
                 "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -893,15 +893,11 @@ def replace_catalog(players: list[dict]):
             "INSERT INTO settings(key,value) VALUES('catalog_revision','1') "
             "ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1"
         )
-        mode_row = conn.execute("SELECT value FROM settings WHERE key=?", (_LEAGUE_SETTING_KEYS["auction_mode"],)).fetchone()
-        mode = str(mode_row["value"] if mode_row else DEFAULT_LEAGUE_SETTINGS["auction_mode"]).strip().lower()
-        if mode == "zero":
-            assigned = int(conn.execute("SELECT COUNT(*) FROM roster").fetchone()[0] or 0)
-            conn.execute(
-                "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(max(0, len(ids) - assigned)),),
-            )
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(_initial_auction_pool_total_conn(conn)),),
+        )
         conn.commit()
 
 
@@ -1101,14 +1097,12 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
             "INSERT INTO roster(team,pid,price) VALUES (?,?,?)",
             [(a["team"].strip(), int(a["pid"]), int(a["price"])) for a in assignments],
         )
-        # Salviamo la dimensione iniziale del bacino d'asta. In seguito le rose
-        # cambiano, quindi calcolarlo dal roster corrente darebbe un totale mobile.
-        total_players = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
-        initial_owned = len({int(a["pid"]) for a in assignments})
+        # Escludiamo i fuori campionato e i giocatori nelle rose iniziali.
+        # Acquisti e svincoli successivi non devono far oscillare questo bacino.
         conn.execute(
             "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(max(0, int(total_players) - initial_owned)),),
+            (str(_initial_auction_pool_total_conn(conn)),),
         )
         conn.commit()
     return {"initial_budget": initial_budget, "budgets_calculated": len(budgets),
@@ -1625,24 +1619,43 @@ def get_passed_players():
 
 
 # ---------- PROGRESSO ASTA ----------
+def _initial_auction_pool_total_conn(conn):
+    """Ricostruisce il bacino iniziale usando solo calciatori in campionato.
+
+    Le versioni fino alla 18.9 salvavano solo un totale che includeva gli
+    asterischi. Ripercorrere gli acquisti al contrario recupera le rose iniziali
+    anche dopo svincoli, riacquisti e annullamenti, senza modificare i dati.
+    Il filtro di quotazione RANDOM non si applica al contatore generale.
+    """
+    initial_owned = {r["pid"] for r in conn.execute("SELECT pid FROM roster")}
+    events = conn.execute(
+        "SELECT pid,released_json FROM auction_events "
+        "WHERE undone=0 AND event_type='assigned' ORDER BY id DESC"
+    ).fetchall()
+    for event in events:
+        initial_owned.discard(event["pid"])
+        for released in json.loads(event["released_json"] or "[]"):
+            initial_owned.add(int(released["pid"]))
+    eligible_ids = {
+        r["pid"] for r in conn.execute("SELECT pid FROM players WHERE out_of_league=0")
+    }
+    return len(eligible_ids - initial_owned)
+
+
 def get_auction_progress():
-    """Numero di calciatori diversi gia' chiusi e totale del bacino iniziale."""
+    """Astati e bacino iniziale, escludendo i calciatori fuori campionato."""
     with get_conn() as conn:
         auctioned = conn.execute(
-            """SELECT COUNT(DISTINCT pid) FROM auction_events
-               WHERE undone=0 AND pid IS NOT NULL AND event_type IN ('assigned','no_offers')"""
+            """SELECT COUNT(DISTINCT e.pid) FROM auction_events e
+               JOIN players p ON p.pid=e.pid
+               WHERE e.undone=0 AND p.out_of_league=0
+                 AND e.event_type IN ('assigned','no_offers')"""
         ).fetchone()[0]
+        total = _initial_auction_pool_total_conn(conn)
         row = conn.execute("SELECT value FROM settings WHERE key='auction_pool_total'").fetchone()
-        if row is not None:
-            total = int(row["value"] or 0)
-        else:
-            # Fallback per database creati con una versione precedente alla v5.
-            free_now = conn.execute(
-                """SELECT COUNT(*) FROM players
-                   WHERE pid NOT IN (SELECT pid FROM roster)
-                     AND pid NOT IN (SELECT pid FROM passed_players)"""
-            ).fetchone()[0]
-            total = int(auctioned) + int(free_now)
+        # Corregge anche il totale gia' salvato dalle versioni precedenti,
+        # senza reimportare le rose o azzerare l'asta in corso.
+        if row is None or row["value"] != str(total):
             conn.execute(
                 "INSERT INTO settings(key,value) VALUES('auction_pool_total',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

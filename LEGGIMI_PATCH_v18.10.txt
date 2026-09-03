@@ -1,0 +1,38 @@
+RANNATONI v18.10 — CONTATORE SENZA CALCIATORI CON ASTERISCO
+
+Patch incrementale per la versione 18.9, verificata sul repository GitHub:
+6eb080cac7058269fc0a7db2635ce3934378a1b0.
+
+COSA CAMBIA
+Il totale mostrato in "11 / 204 astati" esclude i calciatori fuori
+campionato, contrassegnati dall'asterisco. Vale sia per i partecipanti
+sia per gli spettatori.
+
+Il vecchio totale viene corretto automaticamente anche per un'asta gia'
+iniziata. Il calcolo ricostruisce le rose iniziali dallo storico: gli
+svincoli di giocatori con asterisco non vengono sottratti due volte.
+Acquisti, passaggi e annullamenti mantengono coerente il conteggio.
+
+Il catalogo aggiornato determina quali calciatori sono nel campionato.
+Se un giocatore gia' astato viene successivamente marcato fuori campionato,
+esce anche dal conteggio degli astati; la sua assegnazione resta nello
+storico e nella rosa. Il totale e' il bacino iniziale del contatore generale,
+non il numero di candidati al prossimo sorteggio con la soglia Mantra.
+
+COME APPLICARLA
+1. Estrai lo ZIP.
+2. Carica tutti i file estratti nel repository mantenendo le cartelle
+   e sostituendo i file omonimi, in particolare backend/db.py.
+3. Salva il commit e attendi il deploy Railway.
+4. Riapri o aggiorna il sito/app: il contatore ricevera' il totale corretto.
+
+Non occorre ricaricare listone o rose, ne' azzerare l'asta.
+
+VERIFICHE
+44 test unittest superati, inclusi 8 nuovi controlli sul contatore:
+asta di riparazione e da zero, aggiornamento da un totale vecchio o assente,
+svincoli e riacquisti, annullamenti, passati, aggiornamenti del catalogo,
+nuove rose e reset. Superati anche i 5 test esistenti su jolly e timer.
+49 test Python complessivi. Archivio ZIP verificato.
+
+Patch pronta da caricare; non pubblicata dall'assistente.
