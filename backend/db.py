@@ -28,6 +28,7 @@ MIN_GOALKEEPERS = 2
 MAX_GOALKEEPERS = 5
 MIN_OUTFIELD = 21
 REIMBURSE_RATE = 1.0
+EXTRA_TIME_REQUESTS_PER_TEAM = 3
 
 # Valori predefiniti della lega. Restano identici alla configurazione storica
 # di Rannatoni, ma da v17 le regole effettive vengono lette dalla tabella
@@ -121,6 +122,15 @@ def init_db():
                 pid INTEGER PRIMARY KEY,
                 FOREIGN KEY (pid) REFERENCES players(pid) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS auction_extra_time_requests (
+                pid INTEGER PRIMARY KEY,
+                team TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                FOREIGN KEY (pid) REFERENCES players(pid) ON DELETE CASCADE,
+                FOREIGN KEY (team) REFERENCES teams(name) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_extra_time_team ON auction_extra_time_requests(team);
 
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -288,6 +298,7 @@ def _clear_setup_conn(conn, clear_teams: bool):
     conn.execute("DELETE FROM auction_state")
     conn.execute("DELETE FROM auction_events")
     conn.execute("DELETE FROM passed_players")
+    conn.execute("DELETE FROM auction_extra_time_requests")
     conn.execute("DELETE FROM chat_messages")
     conn.execute("DELETE FROM push_subscriptions")
     conn.execute("DELETE FROM roster")
@@ -553,7 +564,7 @@ def update_zero_team(uid: str, username: str, name: str | None = None) -> dict:
         if new_name != old_name:
             dependent = sum(
                 int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (old_name,)).fetchone()[0] or 0)
-                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions", "auction_extra_time_requests")
             )
             if dependent:
                 raise ValueError("Il nome squadra non puo' essere modificato dopo l'inizio delle attivita'.")
@@ -575,7 +586,7 @@ def delete_zero_team(uid: str):
         team = row["name"]
         dependent = sum(
             int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (team,)).fetchone()[0] or 0)
-            for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+            for table in ("roster", "auction_events", "chat_messages", "push_subscriptions", "auction_extra_time_requests")
         )
         if dependent:
             raise ValueError("Non puoi eliminare una squadra che ha gia' dati di mercato.")
@@ -614,7 +625,7 @@ def complete_first_setup(team: str, new_pin: str, requested_name: str | None = N
                 raise ValueError("Questo nome squadra e' gia' utilizzato.")
             dependent = sum(
                 int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE team=?", (team,)).fetchone()[0] or 0)
-                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions")
+                for table in ("roster", "auction_events", "chat_messages", "push_subscriptions", "auction_extra_time_requests")
             )
             if dependent:
                 raise ValueError("Non puoi cambiare il nome squadra dopo l'inizio delle attivita'.")
@@ -694,7 +705,7 @@ def save_team_configuration(items: list[dict]):
         if renames:
             if not zero_mode:
                 raise ValueError("Nell'asta di riparazione i nomi squadra arrivano dal file Rose e non possono essere rinominati qui.")
-            dependent = sum(int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0) for table in ("roster", "auction_events", "chat_messages", "push_subscriptions"))
+            dependent = sum(int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0) for table in ("roster", "auction_events", "chat_messages", "push_subscriptions", "auction_extra_time_requests"))
             if dependent:
                 raise ValueError("Non puoi rinominare le squadre dopo che il mercato ha iniziato a produrre dati.")
             temp_pairs = []
@@ -798,6 +809,7 @@ def reset_all(keep_catalog: bool = False):
         conn.execute("DELETE FROM auction_state")
         conn.execute("DELETE FROM auction_events")
         conn.execute("DELETE FROM passed_players")
+        conn.execute("DELETE FROM auction_extra_time_requests")
         conn.execute("DELETE FROM chat_messages")
         conn.execute("DELETE FROM push_subscriptions")
         conn.execute("DELETE FROM roster")
@@ -1071,6 +1083,7 @@ def replace_initial_rosters(team_names: list[str], assignments: list[dict]):
         conn.execute("DELETE FROM auction_events")
         conn.execute("DELETE FROM auction_state")
         conn.execute("DELETE FROM passed_players")
+        conn.execute("DELETE FROM auction_extra_time_requests")
         conn.execute("DELETE FROM chat_messages")
 
         placeholders = ",".join("?" for _ in teams)
@@ -1139,9 +1152,10 @@ def _session_start_event_id_conn(conn) -> int:
 
 
 def mark_auction_session_start():
-    """Fissa il confine tra rosa iniziale e acquisti della sessione corrente."""
+    """Fissa il confine della sessione e azzera i 3 jolly tempo per squadra."""
     with get_conn() as conn:
         last_id = int(conn.execute("SELECT COALESCE(MAX(id),0) FROM auction_events").fetchone()[0] or 0)
+        conn.execute("DELETE FROM auction_extra_time_requests")
         conn.execute(
             "INSERT INTO settings(key,value) VALUES('auction_session_start_event_id',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1149,6 +1163,52 @@ def mark_auction_session_start():
         )
         conn.commit()
         return last_id
+
+
+def extra_time_status(team: str | None = None, pid: int | None = None) -> dict:
+    """Stato dei jolly tempo della sessione corrente, senza esporre chi li usa."""
+    with get_conn() as conn:
+        used = 0
+        if team:
+            used = int(conn.execute(
+                "SELECT COUNT(*) FROM auction_extra_time_requests WHERE team=?", (team,)
+            ).fetchone()[0] or 0)
+        requested = False
+        if pid is not None:
+            requested = conn.execute(
+                "SELECT 1 FROM auction_extra_time_requests WHERE pid=?", (int(pid),)
+            ).fetchone() is not None
+    return {
+        "limit": EXTRA_TIME_REQUESTS_PER_TEAM,
+        "behavior": "pause",
+        "used": used,
+        "remaining": max(0, EXTRA_TIME_REQUESTS_PER_TEAM - used) if team else None,
+        "requested_for_player": requested,
+    }
+
+
+def request_extra_time(team: str, pid: int) -> dict:
+    """Consuma un jolly: max 3 per squadra e uno solo per calciatore."""
+    team = str(team or "").strip()
+    pid = int(pid)
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM teams WHERE name=?", (team,)).fetchone():
+            raise ValueError("Squadra non riconosciuta.")
+        if not conn.execute("SELECT 1 FROM players WHERE pid=?", (pid,)).fetchone():
+            raise ValueError("Giocatore non trovato.")
+        if conn.execute("SELECT 1 FROM auction_extra_time_requests WHERE pid=?", (pid,)).fetchone():
+            raise ValueError("Tempo extra gia' utilizzato per questo calciatore.")
+        used = int(conn.execute(
+            "SELECT COUNT(*) FROM auction_extra_time_requests WHERE team=?", (team,)
+        ).fetchone()[0] or 0)
+        if used >= EXTRA_TIME_REQUESTS_PER_TEAM:
+            raise ValueError("Hai gia' utilizzato tutti e 3 i tempi extra disponibili.")
+        conn.execute(
+            "INSERT INTO auction_extra_time_requests(pid,team,requested_at) VALUES (?,?,?)",
+            (pid, team, _dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+    return extra_time_status(team, pid)
 
 
 def session_acquired_player_ids(team: str | None = None) -> set[int]:

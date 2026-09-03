@@ -1461,6 +1461,21 @@ async def pass_bid(session: dict = Depends(require_team)):
     return {"ok": True, "auto_opened": result is not None}
 
 
+@app.post("/api/auction/extra-time")
+async def request_extra_time(session: dict = Depends(require_team)):
+    _ensure_pin_changed(session)
+    async with AUCTION_LOCK:
+        try:
+            status = auction.request_extra_time(session["team"])
+        except auction_module.AuctionError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # Il jolly blocca il countdown ma NON le offerte. Da questo momento
+        # la busta si apre automaticamente appena tutti hanno risposto.
+        _stop_timer()
+    await broadcast_state()
+    return {"ok": True, **status}
+
+
 class ReleaseBody(BaseModel):
     pids: list[int]
 

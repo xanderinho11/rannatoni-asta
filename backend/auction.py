@@ -31,6 +31,7 @@ class Auction:
         self.deadline = None
         self.paused = False
         self.paused_remaining = None
+        self.round_extra_seconds = 0
         self.round_history: list[dict] = []
         self.last_result = last
         if persist:
@@ -54,6 +55,7 @@ class Auction:
             "deadline": self.deadline,
             "paused": self.paused,
             "paused_remaining": self.paused_remaining,
+            "round_extra_seconds": self.round_extra_seconds,
             "round_history": self.round_history,
             "last_result": self.last_result,
         }
@@ -72,6 +74,7 @@ class Auction:
             self.deadline = state.get("deadline")
             self.paused = bool(state.get("paused", False))
             self.paused_remaining = state.get("paused_remaining")
+            self.round_extra_seconds = int(state.get("round_extra_seconds") or 0)
             self.round_history = state.get("round_history") or []
             self.last_result = state.get("last_result")
 
@@ -118,6 +121,7 @@ class Auction:
         self.deadline = time.time() + db.bid_duration()
         self.paused = False
         self.paused_remaining = None
+        self.round_extra_seconds = 0
         self.round_history = []
         self.last_result = None
         self._persist()
@@ -135,8 +139,9 @@ class Auction:
     def _validate_turn(self, team: str):
         if self.mode not in ("bidding", "tiebreak"):
             raise AuctionError("Nessuna asta aperta al momento.")
-        if self.paused:
-            raise AuctionError("Il timer e' in pausa.")
+        # La pausa blocca solo il conto alla rovescia: le buste restano
+        # modificabili e possono essere inviate normalmente. Il giro si
+        # chiude appena tutti gli aventi diritto hanno risposto.
         if self.expired():
             raise AuctionError("Tempo scaduto: la busta non puo' piu' essere modificata.")
         if team not in self.eligible_teams:
@@ -240,7 +245,26 @@ class Auction:
             self.paused_remaining = float(self.paused_remaining or 0) + seconds
         else:
             self.deadline = float(self.deadline or time.time()) + seconds
+        self.round_extra_seconds = int(self.round_extra_seconds or 0) + seconds
         self._persist()
+
+    def request_extra_time(self, team: str):
+        """Consuma uno dei 3 jolly della squadra e blocca il timer.
+
+        La pausa non blocca le offerte: il giro resta aperto senza scadenza
+        finche' tutti gli aventi diritto non hanno inviato OFFERTA/PASSO.
+        """
+        if self.paused:
+            raise AuctionError("Il timer e' gia' bloccato.")
+        self._validate_turn(team)
+        if self.current_pid is None:
+            raise AuctionError("Nessun calciatore in asta.")
+        try:
+            status = db.request_extra_time(team, self.current_pid)
+        except ValueError as exc:
+            raise AuctionError(str(exc)) from exc
+        self.pause()
+        return status
 
     # ---------- chiusura ----------
     def close(self):
@@ -290,6 +314,7 @@ class Auction:
             self.deadline = time.time() + db.bid_duration()
             self.paused = False
             self.paused_remaining = None
+            self.round_extra_seconds = 0
             result = {
                 "type": "tiebreak", "teams": sorted(winners), "value": maximum,
                 "pid": self.current_pid, "reveal": reveal,
@@ -495,6 +520,16 @@ class Auction:
             public_last_result.pop("team", None)
             public_last_result.pop("needs_release", None)
 
+        extra_time = db.extra_time_status(viewer_team, self.current_pid if active else None)
+        extra_time["can_request"] = bool(
+            viewer_team
+            and active
+            and viewer_team in self.eligible_teams
+            and not self.paused
+            and not extra_time["requested_for_player"]
+            and int(extra_time.get("remaining") or 0) > 0
+        )
+
         return {
             "mode": self.mode,
             "current_player": player,
@@ -504,8 +539,9 @@ class Auction:
             "all_submitted": self.all_submitted() if active else False,
             "tiebreak_value": self.tiebreak_value,
             "seconds_left": self.seconds_left(),
-            "duration": db.bid_duration(),
+            "duration": db.bid_duration() + int(self.round_extra_seconds or 0),
             "paused": self.paused,
+            "extra_time": extra_time,
             "own_response": own,
             "own_min_bid": own_min_bid,
             "own_release_floor": int(own_release_floor or 0),
