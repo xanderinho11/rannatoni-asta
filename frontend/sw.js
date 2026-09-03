@@ -1,6 +1,7 @@
-const CACHE='rannatoni-shell-v18-8';
+const CACHE='rannatoni-shell-v18-9';
 const ASSETS=[
   '/static/style.css',
+  '/static/auction-ui.js',
   '/static/icon-192.png',
   '/static/icon-512.png',
   '/manifest.webmanifest'

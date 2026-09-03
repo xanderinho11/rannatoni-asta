@@ -1,0 +1,50 @@
+RANNATONI v18.9 — AUTORE DEL BLOCCO TEMPO E RIEPILOGO STABILE
+
+Patch per la versione 18.8. Base verificata sul repository GitHub:
+7ce34ffd2244c3c5059938c3a24602691d392a73.
+
+COSA CAMBIA
+- Quando una squadra usa un blocco tempo, tutti vedono:
+  "Tempo bloccato da [nome squadra]".
+- La stessa indicazione compare agli spettatori e alle squadre che non
+  partecipano allo spareggio.
+- Se viene usato il comando Pausa del Gestore, compare il nome della
+  squadra che lo ha premuto con l'indicazione "(Gestore)".
+- Il nome e' ricavato dalla sessione autenticata e resta salvato in caso
+  di riavvio o riconnessione. Le cifre delle offerte rimangono segrete.
+- Le regole della 18.8 restano valide: 3 blocchi per squadra, al massimo
+  uno per calciatore; si continua a offrire/passare a timer fermo e le
+  buste si aprono appena tutti hanno risposto.
+- Al successivo spareggio non compare piu' erroneamente "Tempo bloccato"
+  se il timer e' ripartito e il jolly e' stato usato nel giro precedente.
+- Gli aggiornamenti che non cambiano il risultato non ricostruiscono
+  il riepilogo post asta. Il countdown viene aggiornato sul posto.
+- La scheda del risultato resta presente anche quando parte o si ferma
+  il countdown successivo: foto e tendine Offerte/Svincolati conservano
+  il loro stato. Risultati modificati e nuove aste continuano ad aggiornarsi.
+
+APPLICAZIONE
+1. Estrai lo ZIP.
+2. Carica tutti i file estratti nel repository, mantenendo i percorsi e
+   sostituendo gli omonimi. E' incluso il NUOVO frontend/auction-ui.js:
+   carica anche questo file, necessario a entrambe le viste.
+3. Salva il commit e attendi il deploy Railway.
+4. Riapri o aggiorna sito/app, anche sul telefono.
+
+Non occorre ricaricare Catalogo o Rose. La patch conserva i dati e i jolly
+gia' utilizzati. Una pausa gia' attiva con la 18.8, il cui autore non era
+stato salvato, resta compatibile ma senza attribuzione certa; l'indicazione
+completa vale per i nuovi blocchi effettuati dalla 18.9.
+
+VERIFICHE
+- 36 test unittest superati, piu' i 5 test jolly/timer ereditati dalla 18.8:
+  41 test Python complessivi.
+- Verificato il callback Pausa del Gestore con sessione autenticata simulata.
+- Controlli JavaScript sulle funzioni effettive di partecipante/spettatore:
+  autore della pausa, ripresa del timer, aggiornamenti ripetuti, countdown,
+  conservazione del nodo risultato e delle tendine, nuove aste e risultati.
+- Sintassi Python/JavaScript e integrita' dello ZIP verificate.
+- Non eseguiti test con l'app FastAPI completa o una prova visiva su telefono.
+  La scomparsa del lampeggio va confermata sul dispositivo dopo il deploy.
+
+La patch e' pronta da caricare e non e' stata pubblicata dall'assistente.

@@ -1502,10 +1502,10 @@ class AddTimeBody(BaseModel):
 
 
 @app.post("/api/auction/admin/pause")
-async def pause_timer(_: dict = Depends(require_auction_manager)):
+async def pause_timer(session: dict = Depends(require_auction_manager)):
     async with AUCTION_LOCK:
         try:
-            auction.pause()
+            auction.pause(team=session["team"], source="manager")
         except auction_module.AuctionError as exc:
             raise HTTPException(400, str(exc)) from exc
         _stop_timer()

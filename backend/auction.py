@@ -30,6 +30,7 @@ class Auction:
         self.tiebreak_value = None
         self.deadline = None
         self.paused = False
+        self.paused_by = None
         self.paused_remaining = None
         self.round_extra_seconds = 0
         self.round_history: list[dict] = []
@@ -54,6 +55,7 @@ class Auction:
             "tiebreak_value": self.tiebreak_value,
             "deadline": self.deadline,
             "paused": self.paused,
+            "paused_by": self.paused_by,
             "paused_remaining": self.paused_remaining,
             "round_extra_seconds": self.round_extra_seconds,
             "round_history": self.round_history,
@@ -73,6 +75,7 @@ class Auction:
             self.tiebreak_value = state.get("tiebreak_value")
             self.deadline = state.get("deadline")
             self.paused = bool(state.get("paused", False))
+            self.paused_by = state.get("paused_by") if self.paused else None
             self.paused_remaining = state.get("paused_remaining")
             self.round_extra_seconds = int(state.get("round_extra_seconds") or 0)
             self.round_history = state.get("round_history") or []
@@ -83,6 +86,7 @@ class Auction:
             if self.mode in ("bidding", "tiebreak") and not self.paused:
                 if self.deadline is None or self.deadline <= time.time():
                     self.paused = True
+                    self.paused_by = {"kind": "system", "team": None}
                     self.paused_remaining = 30
                     self.deadline = None
                     self._persist()
@@ -120,6 +124,7 @@ class Auction:
         self.tiebreak_value = None
         self.deadline = time.time() + db.bid_duration()
         self.paused = False
+        self.paused_by = None
         self.paused_remaining = None
         self.round_extra_seconds = 0
         self.round_history = []
@@ -214,7 +219,7 @@ class Auction:
         return self.mode in ("bidding", "tiebreak") and not self.paused and self.seconds_left() <= 0
 
     # ---------- timer ----------
-    def pause(self):
+    def pause(self, team: str | None = None, source: str = "manager"):
         if self.mode not in ("bidding", "tiebreak"):
             raise AuctionError("Nessun timer da mettere in pausa.")
         if self.paused:
@@ -222,6 +227,7 @@ class Auction:
         self.paused_remaining = max(0, (self.deadline or time.time()) - time.time())
         self.deadline = None
         self.paused = True
+        self.paused_by = {"kind": source, "team": team}
         self._persist()
 
     def resume(self):
@@ -233,6 +239,7 @@ class Auction:
         self.deadline = time.time() + remaining
         self.paused_remaining = None
         self.paused = False
+        self.paused_by = None
         self._persist()
 
     def add_time(self, seconds: int):
@@ -263,7 +270,7 @@ class Auction:
             status = db.request_extra_time(team, self.current_pid)
         except ValueError as exc:
             raise AuctionError(str(exc)) from exc
-        self.pause()
+        self.pause(team=team, source="team")
         return status
 
     # ---------- chiusura ----------
@@ -313,6 +320,7 @@ class Auction:
             self.offers = {}
             self.deadline = time.time() + db.bid_duration()
             self.paused = False
+            self.paused_by = None
             self.paused_remaining = None
             self.round_extra_seconds = 0
             result = {
@@ -389,6 +397,7 @@ class Auction:
             self.mode = "tocca"
             self.deadline = time.time() + TOCCA_REVEAL_MS / 1000
             self.paused = False
+            self.paused_by = None
             self.paused_remaining = None
             self.last_result = result
             self._persist()
@@ -398,6 +407,7 @@ class Auction:
             self.mode = "release"
             self.deadline = None
             self.paused = False
+            self.paused_by = None
             self.paused_remaining = None
             self.last_result = result
             self._persist()
@@ -427,6 +437,7 @@ class Auction:
         result["tocca_pending"] = False
         self.deadline = None
         self.paused = False
+        self.paused_by = None
         self.paused_remaining = None
 
         if result.get("needs_release"):
@@ -541,6 +552,7 @@ class Auction:
             "seconds_left": self.seconds_left(),
             "duration": db.bid_duration() + int(self.round_extra_seconds or 0),
             "paused": self.paused,
+            "paused_by": dict(self.paused_by) if self.paused and self.paused_by else None,
             "extra_time": extra_time,
             "own_response": own,
             "own_min_bid": own_min_bid,
